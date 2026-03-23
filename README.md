@@ -2,6 +2,10 @@
 
 Powerful MCP server for Microsoft Graph API - a complete AI assistant toolkit for Outlook, Calendar, OneDrive, and Contacts.
 
+# Credits
+Fork of https://github.com/inconceivablelabs/microsoft-mcp/tree/master, which is a fork of https://github.com/elyxlz/microsoft-mcp
+Kept as manual fork to provide this to a customer, irrespective of visibility changes of the original repo(s). MIT-Licensed. 
+
 ## Features
 
 - **Email Management**: Read, send, reply, manage attachments, organize folders
