@@ -1,257 +1,242 @@
 # Microsoft MCP
 
-Powerful MCP server for Microsoft Graph API - a complete AI assistant toolkit for Outlook, Calendar, OneDrive, and Contacts.
+Microsoft Graph MCP server for Outlook, Calendar, OneDrive, and Contacts.
 
-# Credits
-Fork of https://github.com/inconceivablelabs/microsoft-mcp/tree/master, which is a fork of https://github.com/elyxlz/microsoft-mcp
-Kept as manual fork to provide this to a customer, irrespective of visibility changes of the original repo(s). MIT-Licensed. 
+## Credits
+
+Fork of https://github.com/inconceivablelabs/microsoft-mcp/tree/master, which is itself a fork of https://github.com/elyxlz/microsoft-mcp.
+
+This repository is maintained as a manual fork for a customer deployment, independent of upstream repo visibility changes. MIT licensed.
+
+## What Changed in This Fork
+
+This fork no longer relies on end users passing `account_id` into business tools.
+
+- All Graph-backed tools run as the request-scoped caller.
+- The default mode is single-tenant OAuth 2.1 plus On-Behalf-Of (`oauth_obo`) for HTTP MCP deployments such as Open WebUI.
+- A compatibility mode (`trusted_header_account`) remains available for shared-cache deployments behind a trusted upstream that injects the current cached Microsoft account ID.
 
 ## Features
 
-- **Email Management**: Read, send, reply, manage attachments, organize folders
-- **Calendar Intelligence**: Create, update, check availability, respond to invitations
-- **OneDrive Files**: Upload, download, browse with pagination
-- **Contacts**: Search and list contacts from your address book
-- **Per-User OAuth/OBO**: Run Graph calls as the authenticated MCP caller in single-tenant Entra deployments
-- **Shared Cache Fallback**: Optional trusted-header/shared-cache mode for legacy account mapping workflows
-- **Unified Search**: Search across emails, files, events, and people
+- Email management for Outlook mailboxes
+- Calendar scheduling and event management
+- OneDrive file listing, download, upload, and search
+- Contact listing, lookup, and updates
+- Unified search across multiple Microsoft Graph resources
+- Request-scoped authentication with no `account_id` tool argument
+- `get_auth_status` diagnostics in both auth modes
 
-## Quick Start with Claude Desktop
+## Authentication Modes
 
-```bash
-# Add Microsoft MCP server (replace with your Azure app ID)
-claude mcp add microsoft-mcp -e MICROSOFT_MCP_CLIENT_ID=your-app-id-here -- uvx --from git+https://github.com/elyxlz/microsoft-mcp.git microsoft-mcp
+### `oauth_obo` (default)
 
-# Start Claude Desktop
-claude
-```
+Use this mode for HTTP MCP frontends such as Open WebUI.
 
-### Usage Examples
+- Open WebUI authenticates each user to the MCP server with OAuth 2.1.
+- The MCP server validates that bearer token.
+- The server exchanges it for a Microsoft Graph token on behalf of the same user.
+- Business tools run against `/me/...` resources for that authenticated caller.
+- `authenticate_account` and `complete_authentication` are not exposed in this mode.
 
-```bash
-# Email examples
-> read my latest emails with full content
-> reply to the email from John saying "I'll review this today"
-> send an email with attachment to alice@example.com
+This mode is single-tenant only.
 
-# Calendar examples  
-> show my calendar for next week
-> check if I'm free tomorrow at 2pm
-> create a meeting with Bob next Monday at 10am
+### `trusted_header_account`
 
-# File examples
-> list files in my OneDrive
-> upload this report to OneDrive
-> search for "project proposal" across all my files
+Use this only when a trusted upstream injects the current cached Microsoft `account_id` into a request header.
 
-# Multi-account
-> list all my Microsoft accounts
-> send email from my work account
-```
+- HTTP requests must include the trusted header configured by `MICROSOFT_MCP_ACCOUNT_HEADER_NAME`.
+- The default header name is `x-microsoft-account-id`.
+- The server resolves that cached account internally and uses the shared MSAL token cache.
+- `authenticate_account` and `complete_authentication` stay available in this mode.
+- `list_accounts` is not exposed as an MCP tool.
 
-## Available Tools
+This mode is not safe for a directly internet-facing MCP server.
 
-### Email Tools
-- **`list_emails`** - List emails with optional body content
-- **`get_email`** - Get specific email with attachments
-- **`create_email_draft`** - Create email draft with attachments support
-- **`send_email`** - Send email immediately with CC/BCC and attachments
-- **`reply_to_email`** - Reply maintaining thread context
-- **`reply_all_email`** - Reply to all recipients in thread
-- **`update_email`** - Mark emails as read/unread
-- **`move_email`** - Move emails between folders
-- **`delete_email`** - Delete emails
-- **`get_attachment`** - Get email attachment content
-- **`search_emails`** - Search emails by query
+## Quick Start for Open WebUI
 
-### Calendar Tools
-- **`list_events`** - List calendar events with details
-- **`get_event`** - Get specific event details
-- **`create_event`** - Create events with location and attendees
-- **`update_event`** - Reschedule or modify events
-- **`delete_event`** - Cancel events
-- **`respond_event`** - Accept/decline/tentative response to invitations
-- **`check_availability`** - Check free/busy times for scheduling
+The default deployment path is `oauth_obo` over HTTP.
 
-### Contact Tools
-- **`list_contacts`** - List all contacts
-- **`get_contact`** - Get specific contact details
-- **`create_contact`** - Create new contact
-- **`update_contact`** - Update contact information
-- **`delete_contact`** - Delete contact
-- **`search_contacts`** - Search contacts by query
+### 1. Create a Microsoft Entra app registration
 
-### File Tools
-- **`list_files`** - Browse OneDrive files and folders
-- **`get_file`** - Download file content
-- **`create_file`** - Upload files to OneDrive
-- **`update_file`** - Update existing file content
-- **`delete_file`** - Delete files or folders
-- **`search_files`** - Search files in OneDrive
+1. Go to Microsoft Entra ID -> App registrations.
+2. Create a new app registration for this MCP server.
+3. Choose single-tenant only.
+4. Under "Expose an API", create a scope such as `access_as_user`.
+5. Under Microsoft Graph delegated permissions, grant the permissions your deployment needs.
+6. Create a client secret.
+7. Record the application ID, tenant ID, client secret, and identifier URI.
 
-### Utility Tools
-- **`unified_search`** - Search across emails, events, and files
-- **`get_auth_status`** - Show whether the current request can be resolved for Microsoft operations
-- **`authenticate_account`** - Start device-flow authentication in `trusted_header_account` mode only
-- **`complete_authentication`** - Complete device-flow authentication in `trusted_header_account` mode only
+Common delegated Graph permissions for this server are:
 
-## Manual Setup
+- `User.Read`
+- `Mail.ReadWrite`
+- `Mail.Send`
+- `Calendars.ReadWrite`
+- `Files.ReadWrite`
+- `Contacts.ReadWrite`
 
-### 1. Azure App Registration
-
-1. Go to [Azure Portal](https://portal.azure.com) → Microsoft Entra ID → App registrations
-2. New registration → Name: `microsoft-mcp`
-3. Supported account types: Single tenant only
-4. Authentication → Add a Web redirect URI for your MCP server callback, e.g. `https://your-server.example.com/auth/callback`
-5. Expose an API → add a custom scope such as `access_as_user`
-6. API permissions → Add these delegated Microsoft Graph permissions:
-   - Mail.ReadWrite
-   - Mail.Send
-   - Calendars.ReadWrite
-   - Files.ReadWrite
-   - Contacts.ReadWrite
-   - User.Read
-7. Create a client secret
-8. Copy Application ID, Directory (tenant) ID, and client secret
-
-### 2. Installation
+### 2. Install this fork
 
 ```bash
-git clone https://github.com/elyxlz/microsoft-mcp.git
+git clone https://github.com/Ithanil/microsoft-mcp.git
 cd microsoft-mcp
 uv sync
 ```
 
-### 3. Server Configuration
+### 3. Configure the server for `oauth_obo`
 
 ```bash
-# Required for both modes
-export MICROSOFT_MCP_CLIENT_ID="your-app-id-here"
+export MICROSOFT_MCP_AUTH_MODE="oauth_obo"
+export MICROSOFT_MCP_CLIENT_ID="your-app-id"
+export MICROSOFT_MCP_CLIENT_SECRET="your-client-secret"
+export MICROSOFT_MCP_TENANT_ID="your-single-tenant-id"
+export MICROSOFT_MCP_BASE_URL="https://your-mcp-server.example.com"
+
+# Optional overrides
+# export MICROSOFT_MCP_IDENTIFIER_URI="api://your-app-id"
+# export MICROSOFT_MCP_API_SCOPE="access_as_user"
+# export MICROSOFT_MCP_GRAPH_AUTHORIZE_SCOPES="User.Read Mail.ReadWrite Mail.Send Calendars.ReadWrite Files.ReadWrite Contacts.ReadWrite"
+# export MICROSOFT_MCP_GRAPH_OBO_SCOPES="https://graph.microsoft.com/.default"
+# export MICROSOFT_MCP_REQUIRE_AUTHORIZATION_CONSENT="true"
+```
+
+Start the server with your normal FastMCP HTTP transport configuration. The application entry point is:
+
+```bash
+uv run microsoft-mcp
+```
+
+### 4. Configure Open WebUI
+
+1. Add the MCP server in Open WebUI as an HTTP MCP integration.
+2. Select OAuth 2.1 as the authentication method.
+3. Use Open WebUI's "Register client" flow so Open WebUI becomes a client of this MCP server.
+4. Have a user enable the MCP integration in chat and complete the browser-based login flow.
+
+After that, Open WebUI sends per-user bearer tokens to the MCP server, and this server performs the Microsoft Graph On-Behalf-Of exchange internally.
+
+## Trusted Header Mode
+
+`trusted_header_account` exists for deployments that still rely on the shared token cache, but want to remove `account_id` from the tool interface.
+
+### Required configuration
+
+```bash
+export MICROSOFT_MCP_AUTH_MODE="trusted_header_account"
+export MICROSOFT_MCP_CLIENT_ID="your-app-id"
 export MICROSOFT_MCP_TENANT_ID="your-single-tenant-id"
 
-# Primary mode: per-user OAuth 2.1 + OBO
-export MICROSOFT_MCP_AUTH_MODE="oauth_obo"
-export MICROSOFT_MCP_CLIENT_SECRET="your-client-secret"
-export MICROSOFT_MCP_BASE_URL="https://your-server.example.com"
-
-# Optional legacy/shared-cache mode
-# export MICROSOFT_MCP_AUTH_MODE="trusted_header_account"
-# uv run authenticate.py
+# Optional overrides
+# export MICROSOFT_MCP_ACCOUNT_HEADER_NAME="x-microsoft-account-id"
+# export MICROSOFT_MCP_TOKEN_CACHE="/path/to/token-cache.json"
 ```
 
-### 4. Claude Desktop Configuration
+### Bootstrap the shared cache
 
-Add to your Claude Desktop configuration:
+Use either of these:
 
-**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`  
-**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+- `uv run authenticate.py`
+- The MCP tools `authenticate_account` and `complete_authentication`
 
-```json
-{
-  "mcpServers": {
-    "microsoft": {
-      "command": "uvx",
-      "args": ["--from", "git+https://github.com/elyxlz/microsoft-mcp.git", "microsoft-mcp"],
-      "env": {
-        "MICROSOFT_MCP_CLIENT_ID": "your-app-id-here"
-      }
-    }
-  }
-}
-```
+### Request routing requirements
 
-Or for local development:
+- Your trusted upstream must inject the current cached Microsoft `account_id` into the configured header for every HTTP request.
+- HTTP requests without that trusted header are rejected for business-tool execution.
+- If the header points at an unknown cached account, the request is not considered authenticated.
+- In non-HTTP local/stdin contexts only, the server keeps a compatibility fallback to the first cached account.
 
-```json
-{
-  "mcpServers": {
-    "microsoft": {
-      "command": "uv",
-      "args": ["--directory", "/path/to/microsoft-mcp", "run", "microsoft-mcp"],
-      "env": {
-        "MICROSOFT_MCP_CLIENT_ID": "your-app-id-here"
-      }
-    }
-  }
-}
+## Tool Surface
+
+Business tools no longer accept `account_id`.
+
+Core categories:
+
+- Email: `list_emails`, `get_email`, `create_email_draft`, `send_email`, `reply_to_email`, `reply_all_email`, `update_email`, `move_email`, `delete_email`, `get_attachment`, `search_emails`
+- Calendar: `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `respond_event`, `check_availability`
+- Contacts: `list_contacts`, `get_contact`, `create_contact`, `update_contact`, `delete_contact`, `search_contacts`
+- Files: `list_files`, `get_file`, `create_file`, `update_file`, `delete_file`, `search_files`
+- Utility: `unified_search`, `get_auth_status`
+
+Auth-specific tools:
+
+- `authenticate_account` and `complete_authentication` are exposed only in `trusted_header_account`
+- `get_auth_status` is exposed in both modes
+
+## Usage Examples
+
+```text
+read my latest emails with full content
+reply to the email from John saying "I'll review this today"
+show my calendar for next week
+check if I'm free tomorrow at 2pm
+list files in my OneDrive
+search for "project proposal" across all my files
 ```
 
 ## Identity Model
 
-Business tools no longer take `account_id`.
+- The tool caller never supplies `account_id`.
+- In `oauth_obo`, the effective Microsoft identity comes from the authenticated MCP bearer token.
+- In `trusted_header_account`, the effective Microsoft identity comes from the trusted request header and the local MSAL cache.
+- `get_auth_status` reports the active auth mode and whether the current request is authenticated and Graph-ready.
 
-- In `oauth_obo` mode, the authenticated MCP caller is used automatically.
-- In `trusted_header_account` mode, the server resolves the effective account internally from a trusted header or the local shared cache flow.
-- Use `get_auth_status` if you need to verify which mode is active and whether the current request is authenticated.
+Typical `get_auth_status` fields include:
 
-```python
-send_email("user@example.com", "Subject", "Body")
-list_emails(limit=10, include_body=True)
-create_event("Meeting", "2024-01-15T10:00:00Z", "2024-01-15T11:00:00Z")
-```
+- `auth_mode`
+- `authenticated`
+- `graph_ready`
+- `username`
+- `principal_id`
+- `tenant_id`
+- `reason`
+
+## Environment Variables
+
+Primary settings:
+
+- `MICROSOFT_MCP_AUTH_MODE`: `oauth_obo` or `trusted_header_account`
+- `MICROSOFT_MCP_CLIENT_ID`: Entra application ID
+- `MICROSOFT_MCP_TENANT_ID`: single-tenant Entra tenant ID
+
+Required in `oauth_obo`:
+
+- `MICROSOFT_MCP_CLIENT_SECRET`
+- `MICROSOFT_MCP_BASE_URL`
+
+Optional overrides:
+
+- `MICROSOFT_MCP_IDENTIFIER_URI`
+- `MICROSOFT_MCP_API_SCOPE`
+- `MICROSOFT_MCP_GRAPH_AUTHORIZE_SCOPES`
+- `MICROSOFT_MCP_GRAPH_OBO_SCOPES`
+- `MICROSOFT_MCP_REQUIRE_AUTHORIZATION_CONSENT`
+- `MICROSOFT_MCP_ACCOUNT_HEADER_NAME`
+- `MICROSOFT_MCP_TOKEN_CACHE`
 
 ## Development
 
 ```bash
-# Run tests
-uv run pytest tests/ -v
-
-# Type checking
+uv run pytest tests -q
 uv run pyright
-
-# Format code
 uvx ruff format .
-
-# Lint
 uvx ruff check --fix --unsafe-fixes .
-```
-
-## Example: AI Assistant Scenarios
-
-### Smart Email Management
-```python
-# List latest emails with full content
-emails = list_emails(limit=10, include_body=True)
-
-# Reply maintaining thread
-reply_to_email(email_id, "Thanks for your message. I'll review and get back to you.")
-
-# Forward with attachments
-email = get_email(email_id)
-attachments = [get_attachment(email_id, att["id"], f"/tmp/{att['name']}") for att in email["attachments"]]
-send_email("boss@company.com", f"FW: {email['subject']}", email["body"]["content"], attachments=attachments)
-```
-
-### Intelligent Scheduling
-```python
-# Check availability before scheduling
-availability = check_availability("2024-01-15T10:00:00Z", "2024-01-15T18:00:00Z", ["colleague@company.com"])
-
-# Create meeting with details
-create_event(
-    "Project Review",
-    "2024-01-15T14:00:00Z", 
-    "2024-01-15T15:00:00Z",
-    location="Conference Room A",
-    body="Quarterly review of project progress",
-    attendees=["colleague@company.com", "manager@company.com"]
-)
 ```
 
 ## Security Notes
 
-- `oauth_obo` mode validates per-user MCP access tokens and exchanges them for Graph tokens on behalf of the caller
-- `trusted_header_account` mode uses the local token cache and should only be used behind a trusted upstream boundary
-- Shared-cache tokens are stored locally in `~/.microsoft_mcp_token_cache.json`
-- Only request permissions your app actually needs
-- Consider using a dedicated app registration for production
+- `oauth_obo` is the recommended production mode.
+- `trusted_header_account` should only run behind a trusted upstream that fully owns the configured account header.
+- Do not trust prompt content for account selection.
+- Do not expose the shared-cache mode directly to the internet.
+- Only grant the Microsoft Graph permissions your deployment actually needs.
 
 ## Troubleshooting
 
-- **Authentication fails**: Check your CLIENT_ID is correct
-- **Missing client secret/base URL**: Required in `oauth_obo` mode
-- **Missing permissions**: Ensure all required API permissions are granted in Azure
-- **Token errors**: Delete `~/.microsoft_mcp_token_cache.json` and re-authenticate
+- `no_authenticated_mcp_user_token`: the request reached the MCP server without a valid authenticated MCP user token
+- `Microsoft Graph OBO exchange failed`: verify client secret, tenant ID, Graph permissions, and consent in Entra
+- `missing required trusted account header`: your trusted upstream did not send `MICROSOFT_MCP_ACCOUNT_HEADER_NAME`
+- `unknown cached account`: the trusted header value does not match any account in the local MSAL cache
+- `No cached access token is available`: re-run `authenticate.py` or the shared-cache auth tools to refresh the cached account
 
 ## License
 

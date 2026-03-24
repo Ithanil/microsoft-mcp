@@ -20,6 +20,7 @@ class RequestIdentity:
     principal_id: str | None = None
     username: str | None = None
     account_id: str | None = None
+    resolution_error: str | None = None
     claims: dict[str, Any] = field(default_factory=dict)
 
 
@@ -118,7 +119,9 @@ def _resolve_cached_account_identity(require_account: bool) -> RequestIdentity:
                 )
             return RequestIdentity(
                 auth_mode=settings.auth_mode,
-                account_id=account_id,
+                resolution_error=(
+                    f"trusted account header '{settings.account_header_name}' references an unknown cached account"
+                ),
             )
         return RequestIdentity(
             auth_mode=settings.auth_mode,
@@ -133,7 +136,12 @@ def _resolve_cached_account_identity(require_account: bool) -> RequestIdentity:
             raise RuntimeError(
                 f"Missing required trusted account header '{settings.account_header_name}'"
             )
-        return RequestIdentity(auth_mode=settings.auth_mode)
+        return RequestIdentity(
+            auth_mode=settings.auth_mode,
+            resolution_error=(
+                f"missing required trusted account header '{settings.account_header_name}'"
+            ),
+        )
 
     if accounts:
         account = accounts[0]
@@ -145,7 +153,14 @@ def _resolve_cached_account_identity(require_account: bool) -> RequestIdentity:
 
     if require_account:
         raise RuntimeError("No authenticated Microsoft account is available in the shared cache")
-    return RequestIdentity(auth_mode=settings.auth_mode)
+    return RequestIdentity(
+        auth_mode=settings.auth_mode,
+        resolution_error="no authenticated Microsoft account is available in the shared cache",
+    )
+
+
+def _get_cached_graph_access_token(account_id: str) -> str:
+    return cache_auth.get_token(account_id, allow_interactive=False)
 
 
 def get_auth_status() -> dict[str, Any]:
@@ -179,17 +194,25 @@ def get_auth_status() -> dict[str, Any]:
         return status
 
     identity = _resolve_cached_account_identity(require_account=False)
-    authenticated = identity.account_id is not None
+    authenticated = identity.account_id is not None and identity.resolution_error is None
     status = {
         "auth_mode": settings.auth_mode,
         "authenticated": authenticated,
-        "graph_ready": authenticated,
+        "graph_ready": False,
         "username": identity.username,
     }
     if not authenticated:
         status["reason"] = (
-            f"missing '{settings.account_header_name}' header or no cached account available"
+            identity.resolution_error
+            or f"missing '{settings.account_header_name}' header or no cached account available"
         )
+        return status
+
+    try:
+        _get_cached_graph_access_token(identity.account_id)
+        status["graph_ready"] = True
+    except Exception as exc:
+        status["reason"] = str(exc)
     return status
 
 
@@ -214,9 +237,7 @@ def resolve_execution_context() -> ExecutionContext:
         identity = _resolve_cached_account_identity(require_account=True)
         return ExecutionContext(
             identity=identity,
-            graph_access_token=cache_auth.get_token(
-                identity.account_id, allow_interactive=False
-            ),
+            graph_access_token=_get_cached_graph_access_token(identity.account_id),
         )
 
     raise RuntimeError(f"Unsupported authentication mode: {settings.auth_mode}")
