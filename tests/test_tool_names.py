@@ -77,3 +77,25 @@ def test_trusted_header_mode_keeps_cached_account_tools(monkeypatch):
         f"Expected 34 tools in trusted_header_account mode, found {len(tool_registry)}: "
         f"{sorted(tool_registry.keys())}"
     )
+
+
+def test_authenticate_account_tool_allows_structured_output(monkeypatch):
+    tool_registry = _load_tool_registry(monkeypatch, "trusted_header_account")
+    tool = tool_registry["authenticate_account"]
+
+    class FakeApp:
+        def initiate_device_flow(self, scopes):
+            return {
+                "user_code": "ABC123",
+                "expires_in": 900,
+                "verification_uri": "https://microsoft.com/devicelogin",
+            }
+
+    monkeypatch.setattr(tools_module.auth, "get_app", lambda: FakeApp())
+
+    response = tool.fn()
+
+    assert response["device_code"] == "ABC123"
+    assert response["verification_url"] == "https://microsoft.com/devicelogin"
+    assert response["expires_in"] == 900
+    assert tool.output_schema == {"additionalProperties": True, "type": "object"}
