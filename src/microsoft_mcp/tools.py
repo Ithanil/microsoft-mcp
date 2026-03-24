@@ -3,9 +3,18 @@ import datetime as dt
 import pathlib as pl
 from typing import Any
 from fastmcp import FastMCP
+from .execution_context import (
+    CurrentGraphAccessToken,
+    build_auth_provider,
+    get_auth_status,
+    should_expose_cached_account_tools,
+)
+from .settings import get_settings
 from . import graph, auth
 
-mcp = FastMCP("microsoft-365")
+SETTINGS = get_settings()
+
+mcp = FastMCP("microsoft-365", auth=build_auth_provider(SETTINGS))
 
 FOLDERS = {
     k.casefold(): v
@@ -20,132 +29,109 @@ FOLDERS = {
 }
 
 
-@mcp.tool(name="list_accounts")
-def list_accounts() -> list[dict[str, str]]:
-    """List all signed-in Microsoft accounts.
-
-    IMPORTANT: Call this first to get the account_id (a UUID string like
-    '39c06527-...') required by all other tools. Do NOT use an email
-    address as account_id — it must be the exact UUID returned here.
-    """
-    return [
-        {"username": acc.username, "account_id": acc.account_id}
-        for acc in auth.list_accounts()
-    ]
+@mcp.tool(name="get_auth_status")
+def get_auth_status_tool() -> dict[str, Any]:
+    """Report whether the current caller can be resolved for Microsoft operations."""
+    return get_auth_status()
 
 
-@mcp.tool(name="authenticate_account")
-def authenticate_account() -> dict[str, str]:
-    """Authenticate a new Microsoft account using device flow authentication
+def _register_cached_account_tools() -> None:
+    @mcp.tool(name="authenticate_account")
+    def authenticate_account() -> dict[str, str]:
+        """Authenticate a new Microsoft account using device flow authentication."""
+        app = auth.get_app()
+        flow = app.initiate_device_flow(scopes=auth.SCOPES)
 
-    Returns authentication instructions and device code for the user to complete authentication.
-    The user must visit the URL and enter the code to authenticate their Microsoft account.
-    """
-    app = auth.get_app()
-    flow = app.initiate_device_flow(scopes=auth.SCOPES)
+        if "user_code" not in flow:
+            error_msg = flow.get("error_description", "Unknown error")
+            raise Exception(f"Failed to get device code: {error_msg}")
 
-    if "user_code" not in flow:
-        error_msg = flow.get("error_description", "Unknown error")
-        raise Exception(f"Failed to get device code: {error_msg}")
+        verification_url = flow.get(
+            "verification_uri",
+            flow.get("verification_url", "https://microsoft.com/devicelogin"),
+        )
 
-    verification_url = flow.get(
-        "verification_uri",
-        flow.get("verification_url", "https://microsoft.com/devicelogin"),
-    )
-
-    return {
-        "status": "authentication_required",
-        "instructions": "To authenticate a new Microsoft account:",
-        "step1": f"Visit: {verification_url}",
-        "step2": f"Enter code: {flow['user_code']}",
-        "step3": "Sign in with the Microsoft account you want to add",
-        "step4": "After authenticating, use the 'complete_authentication' tool to finish the process",
-        "device_code": flow["user_code"],
-        "verification_url": verification_url,
-        "expires_in": flow.get("expires_in", 900),
-        "_flow_cache": str(flow),
-    }
-
-
-@mcp.tool(name="complete_authentication")
-def complete_authentication(flow_cache: str) -> dict[str, str]:
-    """Complete the authentication process after the user has entered the device code
-
-    Args:
-        flow_cache: The flow data returned from authenticate_account (the _flow_cache field)
-
-    Returns:
-        Account information if authentication was successful
-    """
-    import ast
-
-    try:
-        flow = ast.literal_eval(flow_cache)
-    except (ValueError, SyntaxError):
-        raise ValueError("Invalid flow cache data")
-
-    app = auth.get_app()
-    result = app.acquire_token_by_device_flow(flow)
-
-    if "error" in result:
-        error_msg = result.get("error_description", result["error"])
-        if "authorization_pending" in error_msg:
-            return {
-                "status": "pending",
-                "message": "Authentication is still pending. The user needs to complete the authentication process.",
-                "instructions": "Please ensure you've visited the URL and entered the code, then try again.",
-            }
-        raise Exception(f"Authentication failed: {error_msg}")
-
-    # Save the token cache
-    cache = app.token_cache
-    if isinstance(cache, auth.msal.SerializableTokenCache) and cache.has_state_changed:
-        auth._write_cache(cache.serialize())
-
-    # Get the newly added account
-    accounts = app.get_accounts()
-    if accounts:
-        # Find the account that matches the token we just got
-        for account in accounts:
-            if (
-                account.get("username", "").lower()
-                == result.get("id_token_claims", {})
-                .get("preferred_username", "")
-                .lower()
-            ):
-                return {
-                    "status": "success",
-                    "username": account["username"],
-                    "account_id": account["home_account_id"],
-                    "message": f"Successfully authenticated {account['username']}",
-                }
-        # If exact match not found, return the last account
-        account = accounts[-1]
         return {
-            "status": "success",
-            "username": account["username"],
-            "account_id": account["home_account_id"],
-            "message": f"Successfully authenticated {account['username']}",
+            "status": "authentication_required",
+            "instructions": "To authenticate a new Microsoft account:",
+            "step1": f"Visit: {verification_url}",
+            "step2": f"Enter code: {flow['user_code']}",
+            "step3": "Sign in with the Microsoft account you want to add",
+            "step4": "After authenticating, use the 'complete_authentication' tool to finish the process",
+            "device_code": flow["user_code"],
+            "verification_url": verification_url,
+            "expires_in": flow.get("expires_in", 900),
+            "_flow_cache": str(flow),
         }
 
-    return {
-        "status": "error",
-        "message": "Authentication succeeded but no account was found",
-    }
+    @mcp.tool(name="complete_authentication")
+    def complete_authentication(flow_cache: str) -> dict[str, str]:
+        """Complete device-flow authentication for the shared cache mode."""
+        import ast
+
+        try:
+            flow = ast.literal_eval(flow_cache)
+        except (ValueError, SyntaxError):
+            raise ValueError("Invalid flow cache data")
+
+        app = auth.get_app()
+        result = app.acquire_token_by_device_flow(flow)
+
+        if "error" in result:
+            error_msg = result.get("error_description", result["error"])
+            if "authorization_pending" in error_msg:
+                return {
+                    "status": "pending",
+                    "message": "Authentication is still pending. The user needs to complete the authentication process.",
+                    "instructions": "Please ensure you've visited the URL and entered the code, then try again.",
+                }
+            raise Exception(f"Authentication failed: {error_msg}")
+
+        cache = app.token_cache
+        if isinstance(cache, auth.msal.SerializableTokenCache) and cache.has_state_changed:
+            auth._write_cache(cache.serialize())
+
+        accounts = app.get_accounts()
+        if accounts:
+            for account in accounts:
+                if (
+                    account.get("username", "").lower()
+                    == result.get("id_token_claims", {})
+                    .get("preferred_username", "")
+                    .lower()
+                ):
+                    return {
+                        "status": "success",
+                        "username": account["username"],
+                        "account_id": account["home_account_id"],
+                        "message": f"Successfully authenticated {account['username']}",
+                    }
+            account = accounts[-1]
+            return {
+                "status": "success",
+                "username": account["username"],
+                "account_id": account["home_account_id"],
+                "message": f"Successfully authenticated {account['username']}",
+            }
+
+        return {
+            "status": "error",
+            "message": "Authentication succeeded but no account was found",
+        }
+
+
+if should_expose_cached_account_tools(SETTINGS):
+    _register_cached_account_tools()
 
 
 @mcp.tool(name="list_emails")
 def list_emails(
-    account_id: str,
     folder: str = "inbox",
     limit: int = 10,
     include_body: bool = True,
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> list[dict[str, Any]]:
-    """List emails from specified folder.
-
-    Args:
-        account_id: UUID from list_accounts (not an email address)
-    """
+    """List emails from the caller's inbox or another folder."""
     folder_path = FOLDERS.get(folder.casefold(), folder)
 
     if include_body:
@@ -162,7 +148,7 @@ def list_emails(
     emails = list(
         graph.request_paginated(
             f"/me/mailFolders/{folder_path}/messages",
-            account_id,
+            graph_access_token,
             params=params,
             limit=limit,
         )
@@ -174,16 +160,15 @@ def list_emails(
 @mcp.tool(name="get_email")
 def get_email(
     email_id: str,
-    account_id: str,
     include_body: bool = True,
     body_max_length: int = 50000,
     include_attachments: bool = True,
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> dict[str, Any]:
     """Get email details with size limits
 
     Args:
         email_id: The email ID
-        account_id: The account ID
         include_body: Whether to include the email body (default: True)
         body_max_length: Maximum characters for body content (default: 50000)
         include_attachments: Whether to include attachment metadata (default: True)
@@ -192,7 +177,9 @@ def get_email(
     if include_attachments:
         params["$expand"] = "attachments($select=id,name,size,contentType)"
 
-    result = graph.request("GET", f"/me/messages/{email_id}", account_id, params=params)
+    result = graph.request(
+        "GET", f"/me/messages/{email_id}", graph_access_token, params=params
+    )
     if not result:
         raise ValueError(f"Email with ID {email_id} not found")
 
@@ -220,12 +207,12 @@ def get_email(
 
 @mcp.tool(name="create_email_draft")
 def create_email_draft(
-    account_id: str,
     to: str | list[str],
     subject: str,
     body: str,
     cc: str | list[str] | None = None,
     attachments: str | list[str] | None = None,
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> dict[str, Any]:
     """Create an email draft with file path(s) as attachments"""
     to_list = [to] if isinstance(to, str) else to
@@ -276,7 +263,7 @@ def create_email_draft(
     if small_attachments:
         message["attachments"] = small_attachments
 
-    result = graph.request("POST", "/me/messages", account_id, json=message)
+    result = graph.request("POST", "/me/messages", graph_access_token, json=message)
     if not result:
         raise ValueError("Failed to create email draft")
 
@@ -287,7 +274,7 @@ def create_email_draft(
             message_id,
             att["name"],
             att["content_bytes"],
-            account_id,
+            graph_access_token,
             att.get("content_type", "application/octet-stream"),
         )
 
@@ -296,12 +283,12 @@ def create_email_draft(
 
 @mcp.tool(name="send_email")
 def send_email(
-    account_id: str,
     to: str | list[str],
     subject: str,
     body: str,
     cc: str | list[str] | None = None,
     attachments: str | list[str] | None = None,
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> dict[str, str]:
     """Send an email immediately with file path(s) as attachments"""
     to_list = [to] if isinstance(to, str) else to
@@ -354,7 +341,9 @@ def send_email(
             }
             for att in processed_attachments
         ]
-        graph.request("POST", "/me/sendMail", account_id, json={"message": message})
+        graph.request(
+            "POST", "/me/sendMail", graph_access_token, json={"message": message}
+        )
         return {"status": "sent"}
     elif has_large_attachments:
         # Create draft first, then add large attachments, then send
@@ -371,7 +360,7 @@ def send_email(
                 {"emailAddress": {"address": addr}} for addr in cc_list
             ]
 
-        result = graph.request("POST", "/me/messages", account_id, json=message)
+        result = graph.request("POST", "/me/messages", graph_access_token, json=message)
         if not result:
             raise ValueError("Failed to create email draft")
 
@@ -383,7 +372,7 @@ def send_email(
                     message_id,
                     att["name"],
                     att["content_bytes"],
-                    account_id,
+                    graph_access_token,
                     att.get("content_type", "application/octet-stream"),
                 )
             else:
@@ -397,29 +386,30 @@ def send_email(
                 graph.request(
                     "POST",
                     f"/me/messages/{message_id}/attachments",
-                    account_id,
+                    graph_access_token,
                     json=small_att,
                 )
 
-        graph.request("POST", f"/me/messages/{message_id}/send", account_id)
+        graph.request("POST", f"/me/messages/{message_id}/send", graph_access_token)
         return {"status": "sent"}
     else:
-        graph.request("POST", "/me/sendMail", account_id, json={"message": message})
+        graph.request(
+            "POST", "/me/sendMail", graph_access_token, json={"message": message}
+        )
         return {"status": "sent"}
 
 
 @mcp.tool(name="update_email")
 def update_email(
     email_id: str,
-    account_id: str,
     updates: dict[str, Any] | None = None,
     categories: list[str] | None = None,
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> dict[str, Any]:
     """Update email properties (isRead, categories, flag, etc.)
 
     Args:
         email_id: The email ID to update
-        account_id: The account ID
         updates: Arbitrary property updates to pass to the Graph API
             (e.g. {"isRead": true, "flag": {"flagStatus": "flagged"}})
         categories: List of category names to assign to the email
@@ -433,27 +423,34 @@ def update_email(
     if not body:
         raise ValueError("Nothing to update: provide updates and/or categories")
 
-    result = graph.request("PATCH", f"/me/messages/{email_id}", account_id, json=body)
+    result = graph.request(
+        "PATCH", f"/me/messages/{email_id}", graph_access_token, json=body
+    )
     if not result:
         raise ValueError(f"Failed to update email {email_id} - no response")
     return result
 
 
 @mcp.tool(name="delete_email")
-def delete_email(email_id: str, account_id: str) -> dict[str, str]:
+def delete_email(
+    email_id: str,
+    graph_access_token: str = CurrentGraphAccessToken(),
+) -> dict[str, str]:
     """Delete an email"""
-    graph.request("DELETE", f"/me/messages/{email_id}", account_id)
+    graph.request("DELETE", f"/me/messages/{email_id}", graph_access_token)
     return {"status": "deleted"}
 
 
 @mcp.tool(name="move_email")
 def move_email(
-    email_id: str, destination_folder: str, account_id: str
+    email_id: str,
+    destination_folder: str,
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> dict[str, Any]:
     """Move email to another folder"""
     folder_path = FOLDERS.get(destination_folder.casefold(), destination_folder)
 
-    folders = graph.request("GET", "/me/mailFolders", account_id)
+    folders = graph.request("GET", "/me/mailFolders", graph_access_token)
     folder_id = None
 
     if not folders:
@@ -471,7 +468,7 @@ def move_email(
 
     payload = {"destinationId": folder_id}
     result = graph.request(
-        "POST", f"/me/messages/{email_id}/move", account_id, json=payload
+        "POST", f"/me/messages/{email_id}/move", graph_access_token, json=payload
     )
     if not result:
         raise ValueError("Failed to move email - no response from server")
@@ -481,29 +478,37 @@ def move_email(
 
 
 @mcp.tool(name="reply_to_email")
-def reply_to_email(account_id: str, email_id: str, body: str) -> dict[str, str]:
+def reply_to_email(
+    email_id: str,
+    body: str,
+    graph_access_token: str = CurrentGraphAccessToken(),
+) -> dict[str, str]:
     """Reply to an email (sender only)"""
     endpoint = f"/me/messages/{email_id}/reply"
     payload = {"message": {"body": {"contentType": "Text", "content": body}}}
-    graph.request("POST", endpoint, account_id, json=payload)
+    graph.request("POST", endpoint, graph_access_token, json=payload)
     return {"status": "sent"}
 
 
 @mcp.tool(name="reply_all_email")
-def reply_all_email(account_id: str, email_id: str, body: str) -> dict[str, str]:
+def reply_all_email(
+    email_id: str,
+    body: str,
+    graph_access_token: str = CurrentGraphAccessToken(),
+) -> dict[str, str]:
     """Reply to all recipients of an email"""
     endpoint = f"/me/messages/{email_id}/replyAll"
     payload = {"message": {"body": {"contentType": "Text", "content": body}}}
-    graph.request("POST", endpoint, account_id, json=payload)
+    graph.request("POST", endpoint, graph_access_token, json=payload)
     return {"status": "sent"}
 
 
 @mcp.tool(name="list_events")
 def list_events(
-    account_id: str,
     days_ahead: int = 7,
     days_back: int = 0,
     include_details: bool = True,
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> list[dict[str, Any]]:
     """List calendar events within a date range, including individual instances of recurring events.
 
@@ -511,7 +516,6 @@ def list_events(
     endpoint which correctly expands recurring series into individual occurrences.
 
     Args:
-        account_id: UUID from list_accounts (not an email address)
         days_ahead: Number of days forward to search (default 7)
         days_back: Number of days backward to search (default 0)
     """
@@ -535,16 +539,19 @@ def list_events(
 
     # Use calendarView to get recurring event instances
     events = list(
-        graph.request_paginated("/me/calendarView", account_id, params=params)
+        graph.request_paginated("/me/calendarView", graph_access_token, params=params)
     )
 
     return events
 
 
 @mcp.tool(name="get_event")
-def get_event(event_id: str, account_id: str) -> dict[str, Any]:
+def get_event(
+    event_id: str,
+    graph_access_token: str = CurrentGraphAccessToken(),
+) -> dict[str, Any]:
     """Get full event details"""
-    result = graph.request("GET", f"/me/events/{event_id}", account_id)
+    result = graph.request("GET", f"/me/events/{event_id}", graph_access_token)
     if not result:
         raise ValueError(f"Event with ID {event_id} not found")
     return result
@@ -552,7 +559,6 @@ def get_event(event_id: str, account_id: str) -> dict[str, Any]:
 
 @mcp.tool(name="create_event")
 def create_event(
-    account_id: str,
     subject: str,
     start: str,
     end: str,
@@ -560,11 +566,11 @@ def create_event(
     body: str | None = None,
     attendees: str | list[str] | None = None,
     timezone: str = "UTC",
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> dict[str, Any]:
     """Create a calendar event.
 
     Args:
-        account_id: UUID from list_accounts (not an email address)
         timezone: IANA timezone (e.g. 'America/Chicago'). Defaults to UTC.
     """
     event = {
@@ -585,7 +591,7 @@ def create_event(
             {"emailAddress": {"address": a}, "type": "required"} for a in attendees_list
         ]
 
-    result = graph.request("POST", "/me/events", account_id, json=event)
+    result = graph.request("POST", "/me/events", graph_access_token, json=event)
     if not result:
         raise ValueError("Failed to create event")
     return result
@@ -593,7 +599,9 @@ def create_event(
 
 @mcp.tool(name="update_event")
 def update_event(
-    event_id: str, updates: dict[str, Any], account_id: str
+    event_id: str,
+    updates: dict[str, Any],
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> dict[str, Any]:
     """Update event properties"""
     formatted_updates = {}
@@ -616,48 +624,54 @@ def update_event(
         formatted_updates["body"] = {"contentType": "Text", "content": updates["body"]}
 
     result = graph.request(
-        "PATCH", f"/me/events/{event_id}", account_id, json=formatted_updates
+        "PATCH", f"/me/events/{event_id}", graph_access_token, json=formatted_updates
     )
     return result or {"status": "updated"}
 
 
 @mcp.tool(name="delete_event")
 def delete_event(
-    account_id: str, event_id: str, send_cancellation: bool = True
+    event_id: str,
+    send_cancellation: bool = True,
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> dict[str, str]:
     """Delete or cancel a calendar event"""
     if send_cancellation:
-        graph.request("POST", f"/me/events/{event_id}/cancel", account_id, json={})
+        graph.request(
+            "POST", f"/me/events/{event_id}/cancel", graph_access_token, json={}
+        )
     else:
-        graph.request("DELETE", f"/me/events/{event_id}", account_id)
+        graph.request("DELETE", f"/me/events/{event_id}", graph_access_token)
     return {"status": "deleted"}
 
 
 @mcp.tool(name="respond_event")
 def respond_event(
-    account_id: str,
     event_id: str,
     response: str = "accept",
     message: str | None = None,
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> dict[str, str]:
     """Respond to event invitation (accept, decline, tentativelyAccept)"""
     payload: dict[str, Any] = {"sendResponse": True}
     if message:
         payload["comment"] = message
 
-    graph.request("POST", f"/me/events/{event_id}/{response}", account_id, json=payload)
+    graph.request(
+        "POST", f"/me/events/{event_id}/{response}", graph_access_token, json=payload
+    )
     return {"status": response}
 
 
 @mcp.tool(name="check_availability")
 def check_availability(
-    account_id: str,
     start: str,
     end: str,
     attendees: str | list[str] | None = None,
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> dict[str, Any]:
     """Check calendar availability for scheduling"""
-    me_info = graph.request("GET", "/me", account_id)
+    me_info = graph.request("GET", "/me", graph_access_token)
     if not me_info or "mail" not in me_info:
         raise ValueError("Failed to get user email address")
     schedules = [me_info["mail"]]
@@ -672,28 +686,38 @@ def check_availability(
         "availabilityViewInterval": 30,
     }
 
-    result = graph.request("POST", "/me/calendar/getSchedule", account_id, json=payload)
+    result = graph.request(
+        "POST", "/me/calendar/getSchedule", graph_access_token, json=payload
+    )
     if not result:
         raise ValueError("Failed to check availability")
     return result
 
 
 @mcp.tool(name="list_contacts")
-def list_contacts(account_id: str, limit: int = 50) -> list[dict[str, Any]]:
+def list_contacts(
+    limit: int = 50,
+    graph_access_token: str = CurrentGraphAccessToken(),
+) -> list[dict[str, Any]]:
     """List contacts"""
     params = {"$top": min(limit, 100)}
 
     contacts = list(
-        graph.request_paginated("/me/contacts", account_id, params=params, limit=limit)
+        graph.request_paginated(
+            "/me/contacts", graph_access_token, params=params, limit=limit
+        )
     )
 
     return contacts
 
 
 @mcp.tool(name="get_contact")
-def get_contact(contact_id: str, account_id: str) -> dict[str, Any]:
+def get_contact(
+    contact_id: str,
+    graph_access_token: str = CurrentGraphAccessToken(),
+) -> dict[str, Any]:
     """Get contact details"""
-    result = graph.request("GET", f"/me/contacts/{contact_id}", account_id)
+    result = graph.request("GET", f"/me/contacts/{contact_id}", graph_access_token)
     if not result:
         raise ValueError(f"Contact with ID {contact_id} not found")
     return result
@@ -701,11 +725,11 @@ def get_contact(contact_id: str, account_id: str) -> dict[str, Any]:
 
 @mcp.tool(name="create_contact")
 def create_contact(
-    account_id: str,
     given_name: str,
     surname: str | None = None,
     email_addresses: str | list[str] | None = None,
     phone_numbers: dict[str, str] | None = None,
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> dict[str, Any]:
     """Create a new contact"""
     contact: dict[str, Any] = {"givenName": given_name}
@@ -730,7 +754,7 @@ def create_contact(
         if "mobile" in phone_numbers:
             contact["mobilePhone"] = phone_numbers["mobile"]
 
-    result = graph.request("POST", "/me/contacts", account_id, json=contact)
+    result = graph.request("POST", "/me/contacts", graph_access_token, json=contact)
     if not result:
         raise ValueError("Failed to create contact")
     return result
@@ -738,25 +762,32 @@ def create_contact(
 
 @mcp.tool(name="update_contact")
 def update_contact(
-    contact_id: str, updates: dict[str, Any], account_id: str
+    contact_id: str,
+    updates: dict[str, Any],
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> dict[str, Any]:
     """Update contact information"""
     result = graph.request(
-        "PATCH", f"/me/contacts/{contact_id}", account_id, json=updates
+        "PATCH", f"/me/contacts/{contact_id}", graph_access_token, json=updates
     )
     return result or {"status": "updated"}
 
 
 @mcp.tool(name="delete_contact")
-def delete_contact(contact_id: str, account_id: str) -> dict[str, str]:
+def delete_contact(
+    contact_id: str,
+    graph_access_token: str = CurrentGraphAccessToken(),
+) -> dict[str, str]:
     """Delete a contact"""
-    graph.request("DELETE", f"/me/contacts/{contact_id}", account_id)
+    graph.request("DELETE", f"/me/contacts/{contact_id}", graph_access_token)
     return {"status": "deleted"}
 
 
 @mcp.tool(name="list_files")
 def list_files(
-    account_id: str, path: str = "/", limit: int = 50
+    path: str = "/",
+    limit: int = 50,
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> list[dict[str, Any]]:
     """List files and folders in OneDrive"""
     endpoint = (
@@ -770,7 +801,9 @@ def list_files(
     }
 
     items = list(
-        graph.request_paginated(endpoint, account_id, params=params, limit=limit)
+        graph.request_paginated(
+            endpoint, graph_access_token, params=params, limit=limit
+        )
     )
 
     return [
@@ -787,11 +820,15 @@ def list_files(
 
 
 @mcp.tool(name="get_file")
-def get_file(file_id: str, account_id: str, download_path: str) -> dict[str, Any]:
+def get_file(
+    file_id: str,
+    download_path: str,
+    graph_access_token: str = CurrentGraphAccessToken(),
+) -> dict[str, Any]:
     """Download a file from OneDrive to local path"""
     import subprocess
 
-    metadata = graph.request("GET", f"/me/drive/items/{file_id}", account_id)
+    metadata = graph.request("GET", f"/me/drive/items/{file_id}", graph_access_token)
     if not metadata:
         raise ValueError(f"File with ID {file_id} not found")
 
@@ -818,13 +855,15 @@ def get_file(file_id: str, account_id: str, download_path: str) -> dict[str, Any
 
 @mcp.tool(name="create_file")
 def create_file(
-    onedrive_path: str, local_file_path: str, account_id: str
+    onedrive_path: str,
+    local_file_path: str,
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> dict[str, Any]:
     """Upload a local file to OneDrive"""
     path = pl.Path(local_file_path).expanduser().resolve()
     data = path.read_bytes()
     result = graph.upload_large_file(
-        f"/me/drive/root:/{onedrive_path}:", data, account_id
+        f"/me/drive/root:/{onedrive_path}:", data, graph_access_token
     )
     if not result:
         raise ValueError(f"Failed to create file at path: {onedrive_path}")
@@ -832,20 +871,29 @@ def create_file(
 
 
 @mcp.tool(name="update_file")
-def update_file(file_id: str, local_file_path: str, account_id: str) -> dict[str, Any]:
+def update_file(
+    file_id: str,
+    local_file_path: str,
+    graph_access_token: str = CurrentGraphAccessToken(),
+) -> dict[str, Any]:
     """Update OneDrive file content from a local file"""
     path = pl.Path(local_file_path).expanduser().resolve()
     data = path.read_bytes()
-    result = graph.upload_large_file(f"/me/drive/items/{file_id}", data, account_id)
+    result = graph.upload_large_file(
+        f"/me/drive/items/{file_id}", data, graph_access_token
+    )
     if not result:
         raise ValueError(f"Failed to update file with ID: {file_id}")
     return result
 
 
 @mcp.tool(name="delete_file")
-def delete_file(file_id: str, account_id: str) -> dict[str, str]:
+def delete_file(
+    file_id: str,
+    graph_access_token: str = CurrentGraphAccessToken(),
+) -> dict[str, str]:
     """Delete a file or folder"""
-    graph.request("DELETE", f"/me/drive/items/{file_id}", account_id)
+    graph.request("DELETE", f"/me/drive/items/{file_id}", graph_access_token)
     return {"status": "deleted"}
 
 
@@ -920,7 +968,10 @@ _MAX_INLINE_CHARS = 50_000
 
 @mcp.tool(name="get_attachment")
 def get_attachment(
-    email_id: str, attachment_id: str, save_path: str, account_id: str
+    email_id: str,
+    attachment_id: str,
+    save_path: str,
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> dict[str, Any]:
     """Download email attachment to a specified file path.
 
@@ -928,7 +979,9 @@ def get_attachment(
     is returned in a 'content' key. Binary files omit this key.
     """
     result = graph.request(
-        "GET", f"/me/messages/{email_id}/attachments/{attachment_id}", account_id
+        "GET",
+        f"/me/messages/{email_id}/attachments/{attachment_id}",
+        graph_access_token,
     )
 
     if not result:
@@ -967,11 +1020,11 @@ def get_attachment(
 @mcp.tool(name="search_files")
 def search_files(
     query: str,
-    account_id: str,
     limit: int = 50,
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> list[dict[str, Any]]:
     """Search for files in OneDrive using the modern search API."""
-    items = list(graph.search_query(query, ["driveItem"], account_id, limit))
+    items = list(graph.search_query(query, ["driveItem"], graph_access_token, limit))
 
     return [
         {
@@ -989,9 +1042,9 @@ def search_files(
 @mcp.tool(name="search_emails")
 def search_emails(
     query: str,
-    account_id: str,
     limit: int = 50,
     folder: str | None = None,
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> list[dict[str, Any]]:
     """Search emails using the modern search API."""
     if folder:
@@ -1006,17 +1059,19 @@ def search_emails(
         }
 
         return list(
-            graph.request_paginated(endpoint, account_id, params=params, limit=limit)
+            graph.request_paginated(
+                endpoint, graph_access_token, params=params, limit=limit
+            )
         )
 
-    return list(graph.search_query(query, ["message"], account_id, limit))
+    return list(graph.search_query(query, ["message"], graph_access_token, limit))
 
 
 @mcp.tool(name="search_contacts")
 def search_contacts(
     query: str,
-    account_id: str,
     limit: int = 50,
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> list[dict[str, Any]]:
     """Search contacts. Uses traditional search since unified_search doesn't support contacts."""
     params = {
@@ -1025,7 +1080,9 @@ def search_contacts(
     }
 
     contacts = list(
-        graph.request_paginated("/me/contacts", account_id, params=params, limit=limit)
+        graph.request_paginated(
+            "/me/contacts", graph_access_token, params=params, limit=limit
+        )
     )
 
     return contacts
@@ -1034,9 +1091,9 @@ def search_contacts(
 @mcp.tool(name="unified_search")
 def unified_search(
     query: str,
-    account_id: str,
     entity_types: list[str] | None = None,
     limit: int = 50,
+    graph_access_token: str = CurrentGraphAccessToken(),
 ) -> dict[str, list[dict[str, Any]]]:
     """Search across multiple Microsoft 365 resources using the modern search API
 
@@ -1048,7 +1105,7 @@ def unified_search(
 
     results = {entity_type: [] for entity_type in entity_types}
 
-    items = list(graph.search_query(query, entity_types, account_id, limit))
+    items = list(graph.search_query(query, entity_types, graph_access_token, limit))
 
     for item in items:
         resource_type = item.get("@odata.type", "").split(".")[-1]

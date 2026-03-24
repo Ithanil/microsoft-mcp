@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+_DISALLOWED_TENANTS = {"common", "organizations", "consumers"}
+
 CACHE_FILE = pl.Path(
     os.getenv(
         "MICROSOFT_MCP_TOKEN_CACHE",
@@ -37,7 +39,13 @@ def get_app() -> msal.PublicClientApplication:
     if not client_id:
         raise ValueError("MICROSOFT_MCP_CLIENT_ID environment variable is required")
 
-    tenant_id = os.getenv("MICROSOFT_MCP_TENANT_ID", "common")
+    tenant_id = os.getenv("MICROSOFT_MCP_TENANT_ID")
+    if not tenant_id:
+        raise ValueError("MICROSOFT_MCP_TENANT_ID environment variable is required")
+    if tenant_id in _DISALLOWED_TENANTS:
+        raise ValueError(
+            "MICROSOFT_MCP_TENANT_ID must be a specific tenant ID for single-tenant deployments"
+        )
     authority = f"https://login.microsoftonline.com/{tenant_id}"
 
     cache = msal.SerializableTokenCache()
@@ -52,7 +60,7 @@ def get_app() -> msal.PublicClientApplication:
     return app
 
 
-def get_token(account_id: str | None = None) -> str:
+def get_token(account_id: str | None = None, allow_interactive: bool = True) -> str:
     app = get_app()
 
     accounts = app.get_accounts()
@@ -66,7 +74,7 @@ def get_token(account_id: str | None = None) -> str:
             valid_ids = [a["home_account_id"] for a in accounts]
             raise ValueError(
                 f"Account '{account_id}' not found in token cache. "
-                f"Use list_accounts to get valid account IDs. "
+                "Use authenticate.py or your trusted-header account mapping to get a valid cached account ID. "
                 f"Valid accounts: {valid_ids}"
             )
     elif accounts:
@@ -75,6 +83,12 @@ def get_token(account_id: str | None = None) -> str:
     result = app.acquire_token_silent(SCOPES, account=account)
 
     if not result:
+        if not allow_interactive:
+            target = f"account '{account_id}'" if account_id else "the default account"
+            raise RuntimeError(
+                f"No cached access token is available for {target}. "
+                "Use authenticate_account or authenticate.py to complete device-flow authentication."
+            )
         flow = app.initiate_device_flow(scopes=SCOPES)
         if "user_code" not in flow:
             raise Exception(

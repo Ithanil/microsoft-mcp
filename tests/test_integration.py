@@ -9,9 +9,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-if not os.getenv("MICROSOFT_MCP_CLIENT_ID"):
+if not os.getenv("MICROSOFT_MCP_CLIENT_ID") or not os.getenv("MICROSOFT_MCP_TENANT_ID"):
     pytest.skip(
-        "MICROSOFT_MCP_CLIENT_ID environment variable is required",
+        "MICROSOFT_MCP_CLIENT_ID and MICROSOFT_MCP_TENANT_ID environment variables are required",
         allow_module_level=True,
     )
 
@@ -25,7 +25,6 @@ def parse_result(result, tool_name=None):
         data = json.loads(text)
         # FastMCP seems to unwrap single-element lists, so rewrap for consistency
         list_tools = {
-            "list_accounts",
             "list_emails",
             "list_events",
             "list_contacts",
@@ -43,8 +42,9 @@ async def get_session():
         command="uv",
         args=["run", "microsoft-mcp"],
         env={
+            "MICROSOFT_MCP_AUTH_MODE": "trusted_header_account",
             "MICROSOFT_MCP_CLIENT_ID": os.getenv("MICROSOFT_MCP_CLIENT_ID", ""),
-            "MICROSOFT_MCP_TENANT_ID": os.getenv("MICROSOFT_MCP_TENANT_ID", "common"),
+            "MICROSOFT_MCP_TENANT_ID": os.getenv("MICROSOFT_MCP_TENANT_ID", ""),
         },
     )
 
@@ -56,27 +56,24 @@ async def get_session():
 
 async def get_account_info(session):
     """Get account info"""
-    result = await session.call_tool("list_accounts", {})
+    result = await session.call_tool("get_auth_status", {})
     assert not result.isError
-    accounts = parse_result(result, "list_accounts")
-    assert accounts and len(accounts) > 0, (
-        "No accounts found - please authenticate first"
-    )
-
-    return {"email": accounts[0]["username"], "account_id": accounts[0]["account_id"]}
+    status = parse_result(result)
+    assert status.get("authenticated"), "Current session is not authenticated"
+    assert status.get("username"), "Authenticated session should expose a username"
+    return {"email": status["username"]}
 
 
 @pytest.mark.asyncio
-async def test_list_accounts():
-    """Test list_accounts tool"""
+async def test_get_auth_status():
+    """Test get_auth_status tool"""
     async for session in get_session():
-        result = await session.call_tool("list_accounts", {})
+        result = await session.call_tool("get_auth_status", {})
         assert not result.isError
-        accounts = parse_result(result, "list_accounts")
-        assert accounts is not None
-        assert len(accounts) > 0
-        assert "username" in accounts[0]
-        assert "account_id" in accounts[0]
+        status = parse_result(result)
+        assert status.get("auth_mode") == "trusted_header_account"
+        assert status.get("authenticated") is True
+        assert "username" in status
 
 
 @pytest.mark.asyncio
@@ -87,7 +84,6 @@ async def test_list_emails():
         result = await session.call_tool(
             "list_emails",
             {
-                "account_id": account_info["account_id"],
                 "limit": 3,
                 "include_body": True,
             },
@@ -109,7 +105,6 @@ async def test_list_emails_without_body():
         result = await session.call_tool(
             "list_emails",
             {
-                "account_id": account_info["account_id"],
                 "limit": 3,
                 "include_body": False,
             },
@@ -127,7 +122,7 @@ async def test_get_email():
     async for session in get_session():
         account_info = await get_account_info(session)
         list_result = await session.call_tool(
-            "list_emails", {"account_id": account_info["account_id"], "limit": 1}
+            "list_emails", {"limit": 1}
         )
         emails = parse_result(list_result, "list_emails")
 
@@ -135,7 +130,7 @@ async def test_get_email():
             email_id = emails[0].get("id")
             result = await session.call_tool(
                 "get_email",
-                {"email_id": email_id, "account_id": account_info["account_id"]},
+                {"email_id": email_id},
             )
             assert not result.isError
             email_detail = parse_result(result)
@@ -152,7 +147,6 @@ async def test_create_email_draft():
         result = await session.call_tool(
             "create_email_draft",
             {
-                "account_id": account_info["account_id"],
                 "to": account_info["email"],
                 "subject": "MCP Test Draft",
                 "body": "This is a test draft email",
@@ -166,7 +160,7 @@ async def test_create_email_draft():
         draft_id = draft_data.get("id")
         delete_result = await session.call_tool(
             "delete_email",
-            {"email_id": draft_id, "account_id": account_info["account_id"]},
+            {"email_id": draft_id},
         )
         assert not delete_result.isError
 
@@ -177,7 +171,7 @@ async def test_update_email():
     async for session in get_session():
         account_info = await get_account_info(session)
         list_result = await session.call_tool(
-            "list_emails", {"account_id": account_info["account_id"], "limit": 1}
+            "list_emails", {"limit": 1}
         )
         emails = parse_result(list_result, "list_emails")
 
@@ -189,7 +183,6 @@ async def test_update_email():
                 "update_email",
                 {
                     "email_id": email_id,
-                    "account_id": account_info["account_id"],
                     "updates": {"isRead": not original_read_state},
                 },
             )
@@ -199,7 +192,6 @@ async def test_update_email():
                 "update_email",
                 {
                     "email_id": email_id,
-                    "account_id": account_info["account_id"],
                     "updates": {"isRead": original_read_state},
                 },
             )
@@ -214,7 +206,6 @@ async def test_delete_email():
         draft_result = await session.call_tool(
             "create_email_draft",
             {
-                "account_id": account_info["account_id"],
                 "to": account_info["email"],
                 "subject": "MCP Test Delete",
                 "body": "This email will be deleted",
@@ -226,7 +217,6 @@ async def test_delete_email():
                 "delete_email",
                 {
                     "email_id": draft_data.get("id"),
-                    "account_id": account_info["account_id"],
                 },
             )
             assert not result.isError
@@ -242,7 +232,7 @@ async def test_move_email():
         account_info = await get_account_info(session)
         list_result = await session.call_tool(
             "list_emails",
-            {"account_id": account_info["account_id"], "folder": "inbox", "limit": 1},
+            {"folder": "inbox", "limit": 1},
         )
         emails = parse_result(list_result, "list_emails")
 
@@ -252,7 +242,6 @@ async def test_move_email():
                 "move_email",
                 {
                     "email_id": email_id,
-                    "account_id": account_info["account_id"],
                     "destination_folder": "archive",
                 },
             )
@@ -265,7 +254,6 @@ async def test_move_email():
                 "move_email",
                 {
                     "email_id": new_email_id,
-                    "account_id": account_info["account_id"],
                     "destination_folder": "inbox",
                 },
             )
@@ -279,7 +267,7 @@ async def test_reply_to_email():
         account_info = await get_account_info(session)
         await asyncio.sleep(2)
         list_result = await session.call_tool(
-            "list_emails", {"account_id": account_info["account_id"], "limit": 5}
+            "list_emails", {"limit": 5}
         )
         emails = parse_result(list_result, "list_emails")
 
@@ -294,7 +282,6 @@ async def test_reply_to_email():
             result = await session.call_tool(
                 "reply_to_email",
                 {
-                    "account_id": account_info["account_id"],
                     "email_id": test_email.get("id"),
                     "body": "This is a test reply",
                 },
@@ -312,7 +299,7 @@ async def test_reply_all_email():
         account_info = await get_account_info(session)
         await asyncio.sleep(2)
         list_result = await session.call_tool(
-            "list_emails", {"account_id": account_info["account_id"], "limit": 5}
+            "list_emails", {"limit": 5}
         )
         emails = parse_result(list_result, "list_emails")
 
@@ -327,7 +314,6 @@ async def test_reply_all_email():
             result = await session.call_tool(
                 "reply_all_email",
                 {
-                    "account_id": account_info["account_id"],
                     "email_id": test_email.get("id"),
                     "body": "This is a test reply to all",
                 },
@@ -346,7 +332,6 @@ async def test_list_events():
         result = await session.call_tool(
             "list_events",
             {
-                "account_id": account_info["account_id"],
                 "days_ahead": 14,
                 "include_details": True,
             },
@@ -367,7 +352,7 @@ async def test_get_event():
     async for session in get_session():
         account_info = await get_account_info(session)
         list_result = await session.call_tool(
-            "list_events", {"account_id": account_info["account_id"], "days_ahead": 30}
+            "list_events", {"days_ahead": 30}
         )
         events = parse_result(list_result, "list_events")
 
@@ -375,7 +360,7 @@ async def test_get_event():
             event_id = events[0].get("id")
             result = await session.call_tool(
                 "get_event",
-                {"event_id": event_id, "account_id": account_info["account_id"]},
+                {"event_id": event_id},
             )
             assert not result.isError
             event_detail = parse_result(result)
@@ -395,7 +380,6 @@ async def test_create_event():
         result = await session.call_tool(
             "create_event",
             {
-                "account_id": account_info["account_id"],
                 "subject": "MCP Integration Test Event",
                 "start": start_time.isoformat(),
                 "end": end_time.isoformat(),
@@ -413,7 +397,6 @@ async def test_create_event():
         delete_result = await session.call_tool(
             "delete_event",
             {
-                "account_id": account_info["account_id"],
                 "event_id": event_id,
                 "send_cancellation": False,
             },
@@ -432,7 +415,6 @@ async def test_update_event():
         create_result = await session.call_tool(
             "create_event",
             {
-                "account_id": account_info["account_id"],
                 "subject": "MCP Test Event for Update",
                 "start": start_time.isoformat(),
                 "end": end_time.isoformat(),
@@ -449,7 +431,6 @@ async def test_update_event():
             "update_event",
             {
                 "event_id": event_id,
-                "account_id": account_info["account_id"],
                 "updates": {
                     "subject": "MCP Test Event (Updated)",
                     "start": new_start.isoformat(),
@@ -463,7 +444,6 @@ async def test_update_event():
         delete_result = await session.call_tool(
             "delete_event",
             {
-                "account_id": account_info["account_id"],
                 "event_id": event_id,
                 "send_cancellation": False,
             },
@@ -482,7 +462,6 @@ async def test_delete_event():
         create_result = await session.call_tool(
             "create_event",
             {
-                "account_id": account_info["account_id"],
                 "subject": "MCP Test Event for Deletion",
                 "start": start_time.isoformat(),
                 "end": end_time.isoformat(),
@@ -495,7 +474,6 @@ async def test_delete_event():
         result = await session.call_tool(
             "delete_event",
             {
-                "account_id": account_info["account_id"],
                 "event_id": event_id,
                 "send_cancellation": False,
             },
@@ -512,7 +490,7 @@ async def test_respond_event():
     async for session in get_session():
         account_info = await get_account_info(session)
         list_result = await session.call_tool(
-            "list_events", {"account_id": account_info["account_id"], "days_ahead": 30}
+            "list_events", {"days_ahead": 30}
         )
         events = parse_result(list_result, "list_events")
 
@@ -525,7 +503,6 @@ async def test_respond_event():
                 result = await session.call_tool(
                     "respond_event",
                     {
-                        "account_id": account_info["account_id"],
                         "event_id": invite_event.get("id"),
                         "response": "tentativelyAccept",
                         "message": "I might be able to attend",
@@ -556,7 +533,6 @@ async def test_check_availability():
         result = await session.call_tool(
             "check_availability",
             {
-                "account_id": account_info["account_id"],
                 "start": check_start,
                 "end": check_end,
                 "attendees": [account_info["email"]],
@@ -573,7 +549,7 @@ async def test_list_contacts():
     async for session in get_session():
         account_info = await get_account_info(session)
         result = await session.call_tool(
-            "list_contacts", {"account_id": account_info["account_id"], "limit": 10}
+            "list_contacts", {"limit": 10}
         )
         assert not result.isError
         contacts = parse_result(result, "list_contacts")
@@ -588,7 +564,7 @@ async def test_get_contact():
     async for session in get_session():
         account_info = await get_account_info(session)
         list_result = await session.call_tool(
-            "list_contacts", {"account_id": account_info["account_id"], "limit": 1}
+            "list_contacts", {"limit": 1}
         )
         assert not list_result.isError
         contacts = parse_result(list_result, "list_contacts")
@@ -596,7 +572,7 @@ async def test_get_contact():
             contact_id = contacts[0].get("id")
             result = await session.call_tool(
                 "get_contact",
-                {"contact_id": contact_id, "account_id": account_info["account_id"]},
+                {"contact_id": contact_id},
             )
             assert not result.isError
             contact_detail = parse_result(result)
@@ -612,7 +588,6 @@ async def test_create_contact():
         result = await session.call_tool(
             "create_contact",
             {
-                "account_id": account_info["account_id"],
                 "given_name": "MCP",
                 "surname": "TestContact",
                 "email_addresses": ["mcp.test@example.com"],
@@ -627,7 +602,7 @@ async def test_create_contact():
         contact_id = new_contact.get("id")
         delete_result = await session.call_tool(
             "delete_contact",
-            {"contact_id": contact_id, "account_id": account_info["account_id"]},
+            {"contact_id": contact_id},
         )
         assert not delete_result.isError
 
@@ -640,7 +615,6 @@ async def test_update_contact():
         create_result = await session.call_tool(
             "create_contact",
             {
-                "account_id": account_info["account_id"],
                 "given_name": "MCPUpdate",
                 "surname": "Test",
             },
@@ -653,7 +627,6 @@ async def test_update_contact():
             "update_contact",
             {
                 "contact_id": contact_id,
-                "account_id": account_info["account_id"],
                 "updates": {"givenName": "MCPUpdated"},
             },
         )
@@ -661,7 +634,7 @@ async def test_update_contact():
 
         delete_result = await session.call_tool(
             "delete_contact",
-            {"contact_id": contact_id, "account_id": account_info["account_id"]},
+            {"contact_id": contact_id},
         )
         assert not delete_result.isError
 
@@ -674,7 +647,6 @@ async def test_delete_contact():
         create_result = await session.call_tool(
             "create_contact",
             {
-                "account_id": account_info["account_id"],
                 "given_name": "MCPDelete",
                 "surname": "Test",
             },
@@ -685,7 +657,7 @@ async def test_delete_contact():
 
         result = await session.call_tool(
             "delete_contact",
-            {"contact_id": contact_id, "account_id": account_info["account_id"]},
+            {"contact_id": contact_id},
         )
         assert not result.isError
         delete_result = parse_result(result)
@@ -699,7 +671,7 @@ async def test_list_files():
     async for session in get_session():
         account_info = await get_account_info(session)
         result = await session.call_tool(
-            "list_files", {"account_id": account_info["account_id"]}
+            "list_files", {}
         )
         assert not result.isError
         files = parse_result(result)
@@ -729,7 +701,6 @@ async def test_get_file():
             create_result = await session.call_tool(
                 "create_file",
                 {
-                    "account_id": account_info["account_id"],
                     "onedrive_path": test_filename,
                     "local_file_path": local_file_path,
                 },
@@ -749,7 +720,6 @@ async def test_get_file():
                 "get_file",
                 {
                     "file_id": file_id,
-                    "account_id": account_info["account_id"],
                     "download_path": tmp_path,
                 },
             )
@@ -772,7 +742,7 @@ async def test_get_file():
 
         delete_result = await session.call_tool(
             "delete_file",
-            {"file_id": file_id, "account_id": account_info["account_id"]},
+            {"file_id": file_id},
         )
         assert not delete_result.isError
 
@@ -798,7 +768,6 @@ async def test_create_file():
             result = await session.call_tool(
                 "create_file",
                 {
-                    "account_id": account_info["account_id"],
                     "onedrive_path": test_filename,
                     "local_file_path": local_file_path,
                 },
@@ -815,7 +784,7 @@ async def test_create_file():
         file_id = upload_result.get("id")
         delete_result = await session.call_tool(
             "delete_file",
-            {"file_id": file_id, "account_id": account_info["account_id"]},
+            {"file_id": file_id},
         )
         assert not delete_result.isError
 
@@ -841,7 +810,6 @@ async def test_update_file():
             create_result = await session.call_tool(
                 "create_file",
                 {
-                    "account_id": account_info["account_id"],
                     "onedrive_path": test_filename,
                     "local_file_path": local_file_path,
                 },
@@ -864,7 +832,6 @@ async def test_update_file():
             result = await session.call_tool(
                 "update_file",
                 {
-                    "account_id": account_info["account_id"],
                     "file_id": file_id,
                     "local_file_path": updated_file_path,
                 },
@@ -877,7 +844,7 @@ async def test_update_file():
 
         delete_result = await session.call_tool(
             "delete_file",
-            {"file_id": file_id, "account_id": account_info["account_id"]},
+            {"file_id": file_id},
         )
         assert not delete_result.isError
 
@@ -903,7 +870,6 @@ async def test_delete_file():
             create_result = await session.call_tool(
                 "create_file",
                 {
-                    "account_id": account_info["account_id"],
                     "onedrive_path": test_filename,
                     "local_file_path": local_file_path,
                 },
@@ -917,7 +883,7 @@ async def test_delete_file():
 
         result = await session.call_tool(
             "delete_file",
-            {"file_id": file_id, "account_id": account_info["account_id"]},
+            {"file_id": file_id},
         )
         assert not result.isError
         delete_result = parse_result(result)
@@ -946,7 +912,6 @@ async def test_get_attachment():
             draft_result = await session.call_tool(
                 "create_email_draft",
                 {
-                    "account_id": account_info["account_id"],
                     "to": account_info["email"],
                     "subject": "MCP Test Email with Attachment",
                     "body": "This email contains a test attachment",
@@ -968,7 +933,6 @@ async def test_get_attachment():
             "get_email",
             {
                 "email_id": email_id,
-                "account_id": account_info["account_id"],
             },
         )
         email_detail = parse_result(email_result)
@@ -985,7 +949,6 @@ async def test_get_attachment():
                 "get_attachment",
                 {
                     "email_id": email_id,
-                    "account_id": account_info["account_id"],
                     "attachment_id": attachment["id"],
                     "save_path": save_path,
                 },
@@ -1012,7 +975,6 @@ async def test_get_attachment():
             "delete_email",
             {
                 "email_id": email_id,
-                "account_id": account_info["account_id"],
             },
         )
 
@@ -1024,7 +986,7 @@ async def test_search_files():
         account_info = await get_account_info(session)
         result = await session.call_tool(
             "search_files",
-            {"account_id": account_info["account_id"], "query": "test", "limit": 5},
+            {"query": "test", "limit": 5},
         )
         assert not result.isError
         search_results = parse_result(result)
@@ -1038,7 +1000,7 @@ async def test_search_emails():
         account_info = await get_account_info(session)
         result = await session.call_tool(
             "search_emails",
-            {"account_id": account_info["account_id"], "query": "test", "limit": 5},
+            {"query": "test", "limit": 5},
         )
         assert not result.isError
         search_results = parse_result(result)
@@ -1053,7 +1015,6 @@ async def test_search_contacts():
         result = await session.call_tool(
             "search_contacts",
             {
-                "account_id": account_info["account_id"],
                 "query": account_info["email"].split("@")[0],
                 "limit": 5,
             },
@@ -1073,7 +1034,6 @@ async def test_send_email():
         result = await session.call_tool(
             "send_email",
             {
-                "account_id": account_info["account_id"],
                 "to": account_info["email"],
                 "subject": f"MCP Test Send Email {datetime.now(timezone.utc).isoformat()}",
                 "body": "This is a test email sent via send_email tool",
@@ -1094,7 +1054,6 @@ async def test_unified_search():
         result = await session.call_tool(
             "unified_search",
             {
-                "account_id": account_info["account_id"],
                 "query": "test",
                 "entity_types": ["message"],
                 "limit": 10,

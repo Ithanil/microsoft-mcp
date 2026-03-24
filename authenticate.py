@@ -24,9 +24,15 @@ def main():
         print("\nPlease set it in your .env file or environment:")
         print("export MICROSOFT_MCP_CLIENT_ID='your-app-id'")
         sys.exit(1)
+    if not os.getenv("MICROSOFT_MCP_TENANT_ID"):
+        print("Error: MICROSOFT_MCP_TENANT_ID environment variable is required")
+        print("\nPlease set it in your .env file or environment:")
+        print("export MICROSOFT_MCP_TENANT_ID='your-tenant-id'")
+        sys.exit(1)
 
     print("Microsoft MCP Authentication")
     print("============================\n")
+    print("This CLI is used by the shared cache/header-based auth mode.\n")
 
     # List current accounts
     accounts = auth.list_accounts()
@@ -73,10 +79,11 @@ def main():
             print(f"• {account.username}")
             print(f"  Account ID: {account.account_id}")
 
+        print("\nThese account IDs are used for the shared cache/header-based auth mode.")
         print(
-            "\nYou can use these account IDs with any MCP tool by passing account_id parameter."
+            "They are not part of the OAuth/OBO tool interface, but they may still be"
         )
-        print("Example: send_email(..., account_id='<account-id>')")
+        print("needed for upstream account mapping or trusted-header routing.")
     else:
         print("\nNo accounts authenticated.")
 

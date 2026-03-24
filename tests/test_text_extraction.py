@@ -118,14 +118,15 @@ class TestGetAttachmentInlineContent:
     def test_text_file_includes_content_key(self, mock_graph, tmp_path):
         from microsoft_mcp.tools import get_attachment as _get_attachment_tool
 
-        # FastMCP 2.8.0: @mcp.tool(name=...) wraps in FunctionTool; .fn is the raw callable
-        get_attachment = _get_attachment_tool.fn
+        get_attachment = getattr(_get_attachment_tool, "fn", _get_attachment_tool)
 
         text = b"Meeting notes from Monday."
         mock_graph.request.return_value = self._mock_graph_response(text, "text/plain", "notes.txt")
 
         save_path = str(tmp_path / "notes.txt")
-        result = get_attachment("email1", "att1", save_path, "account1")
+        result = get_attachment(
+            "email1", "att1", save_path, graph_access_token="token-1"
+        )
 
         assert "content" in result
         assert result["content"] == "Meeting notes from Monday."
@@ -135,13 +136,15 @@ class TestGetAttachmentInlineContent:
     def test_binary_file_omits_content_key(self, mock_graph, tmp_path):
         from microsoft_mcp.tools import get_attachment as _get_attachment_tool
 
-        get_attachment = _get_attachment_tool.fn
+        get_attachment = getattr(_get_attachment_tool, "fn", _get_attachment_tool)
 
         binary = b"\x89PNG\r\n\x1a\n\x00\x00\x00"
         mock_graph.request.return_value = self._mock_graph_response(binary, "image/png", "photo.png")
 
         save_path = str(tmp_path / "photo.png")
-        result = get_attachment("email1", "att1", save_path, "account1")
+        result = get_attachment(
+            "email1", "att1", save_path, graph_access_token="token-1"
+        )
 
         assert "content" not in result
         assert result["saved_to"] == save_path
@@ -150,13 +153,15 @@ class TestGetAttachmentInlineContent:
     def test_truncates_large_text(self, mock_graph, tmp_path):
         from microsoft_mcp.tools import get_attachment as _get_attachment_tool
 
-        get_attachment = _get_attachment_tool.fn
+        get_attachment = getattr(_get_attachment_tool, "fn", _get_attachment_tool)
 
         large_text = b"x" * 60_000
         mock_graph.request.return_value = self._mock_graph_response(large_text, "text/plain", "big.txt")
 
         save_path = str(tmp_path / "big.txt")
-        result = get_attachment("email1", "att1", save_path, "account1")
+        result = get_attachment(
+            "email1", "att1", save_path, graph_access_token="token-1"
+        )
 
         assert "content" in result
         assert "truncated" in result["content"].lower()

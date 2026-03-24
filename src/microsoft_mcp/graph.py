@@ -1,7 +1,6 @@
 import httpx
 import time
 from typing import Any, Iterator
-from .auth import get_token
 
 BASE_URL = "https://graph.microsoft.com/v1.0"
 # 15 x 320 KiB = 4,915,200 bytes
@@ -13,14 +12,14 @@ _client = httpx.Client(timeout=30.0, follow_redirects=True)
 def request(
     method: str,
     path: str,
-    account_id: str | None = None,
+    graph_access_token: str,
     params: dict[str, Any] | None = None,
     json: dict[str, Any] | None = None,
     data: bytes | None = None,
     max_retries: int = 3,
 ) -> dict[str, Any] | None:
     headers = {
-        "Authorization": f"Bearer {get_token(account_id)}",
+        "Authorization": f"Bearer {graph_access_token}",
     }
 
     if method == "GET":
@@ -85,7 +84,7 @@ def request(
 
 def request_paginated(
     path: str,
-    account_id: str | None = None,
+    graph_access_token: str,
     params: dict[str, Any] | None = None,
     limit: int | None = None,
 ) -> Iterator[dict[str, Any]]:
@@ -95,9 +94,11 @@ def request_paginated(
 
     while True:
         if next_link:
-            result = request("GET", next_link.replace(BASE_URL, ""), account_id)
+            result = request(
+                "GET", next_link.replace(BASE_URL, ""), graph_access_token
+            )
         else:
-            result = request("GET", path, account_id, params=params)
+            result = request("GET", path, graph_access_token, params=params)
 
         if not result:
             break
@@ -115,9 +116,9 @@ def request_paginated(
 
 
 def download_raw(
-    path: str, account_id: str | None = None, max_retries: int = 3
+    path: str, graph_access_token: str, max_retries: int = 3
 ) -> bytes:
-    headers = {"Authorization": f"Bearer {get_token(account_id)}"}
+    headers = {"Authorization": f"Bearer {graph_access_token}"}
 
     retry_count = 0
     while retry_count <= max_retries:
@@ -200,12 +201,14 @@ def _do_chunked_upload(
 
 def create_upload_session(
     path: str,
-    account_id: str | None = None,
+    graph_access_token: str,
     item_properties: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create an upload session for large files"""
     payload = {"item": item_properties or {}}
-    result = request("POST", f"{path}/createUploadSession", account_id, json=payload)
+    result = request(
+        "POST", f"{path}/createUploadSession", graph_access_token, json=payload
+    )
     if not result:
         raise ValueError("Failed to create upload session")
     return result
@@ -214,35 +217,35 @@ def create_upload_session(
 def upload_large_file(
     path: str,
     data: bytes,
-    account_id: str | None = None,
+    graph_access_token: str,
     item_properties: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Upload a large file using upload sessions"""
     file_size = len(data)
 
     if file_size <= UPLOAD_CHUNK_SIZE:
-        result = request("PUT", f"{path}/content", account_id, data=data)
+        result = request("PUT", f"{path}/content", graph_access_token, data=data)
         if not result:
             raise ValueError("Failed to upload file")
         return result
 
-    session = create_upload_session(path, account_id, item_properties)
+    session = create_upload_session(path, graph_access_token, item_properties)
     upload_url = session["uploadUrl"]
 
-    headers = {"Authorization": f"Bearer {get_token(account_id)}"}
+    headers = {"Authorization": f"Bearer {graph_access_token}"}
     return _do_chunked_upload(upload_url, data, headers)
 
 
 def create_mail_upload_session(
     message_id: str,
     attachment_item: dict[str, Any],
-    account_id: str | None = None,
+    graph_access_token: str,
 ) -> dict[str, Any]:
     """Create an upload session for large mail attachments"""
     result = request(
         "POST",
         f"/me/messages/{message_id}/attachments/createUploadSession",
-        account_id,
+        graph_access_token,
         json={"AttachmentItem": attachment_item},
     )
     if not result:
@@ -254,7 +257,7 @@ def upload_large_mail_attachment(
     message_id: str,
     name: str,
     data: bytes,
-    account_id: str | None = None,
+    graph_access_token: str,
     content_type: str = "application/octet-stream",
 ) -> dict[str, Any]:
     """Upload a large mail attachment using upload sessions"""
@@ -267,17 +270,19 @@ def upload_large_mail_attachment(
         "contentType": content_type,
     }
 
-    session = create_mail_upload_session(message_id, attachment_item, account_id)
+    session = create_mail_upload_session(
+        message_id, attachment_item, graph_access_token
+    )
     upload_url = session["uploadUrl"]
 
-    headers = {"Authorization": f"Bearer {get_token(account_id)}"}
+    headers = {"Authorization": f"Bearer {graph_access_token}"}
     return _do_chunked_upload(upload_url, data, headers)
 
 
 def search_query(
     query: str,
     entity_types: list[str],
-    account_id: str | None = None,
+    graph_access_token: str,
     limit: int = 50,
     fields: list[str] | None = None,
 ) -> Iterator[dict[str, Any]]:
@@ -299,7 +304,7 @@ def search_query(
     items_returned = 0
 
     while True:
-        result = request("POST", "/search/query", account_id, json=payload)
+        result = request("POST", "/search/query", graph_access_token, json=payload)
 
         if not result or "value" not in result:
             break
