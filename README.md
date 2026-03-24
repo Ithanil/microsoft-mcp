@@ -126,8 +126,12 @@ export MICROSOFT_MCP_AUTH_MODE="trusted_header_account"
 export MICROSOFT_MCP_CLIENT_ID="your-app-id"
 export MICROSOFT_MCP_TENANT_ID="your-single-tenant-id"
 
+# Strongly recommended for HTTP deployments
+# export MICROSOFT_MCP_TRUSTED_HEADER_SECRET="shared-secret-from-your-upstream"
+
 # Optional overrides
 # export MICROSOFT_MCP_ACCOUNT_HEADER_NAME="x-microsoft-account-id"
+# export MICROSOFT_MCP_TRUSTED_HEADER_SECRET_NAME="x-microsoft-mcp-trusted-secret"
 # export MICROSOFT_MCP_TOKEN_CACHE="/path/to/token-cache.json"
 ```
 
@@ -141,6 +145,8 @@ Use either of these:
 ### Request routing requirements
 
 - Your trusted upstream must inject the current cached Microsoft `account_id` into the configured header for every HTTP request.
+- If `MICROSOFT_MCP_TRUSTED_HEADER_SECRET` is configured, the upstream must also inject the matching secret into `MICROSOFT_MCP_TRUSTED_HEADER_SECRET_NAME`.
+- Requests with a missing or invalid trust-proof header are treated as untrusted and rejected before Graph access.
 - HTTP requests without that trusted header are rejected for business-tool execution.
 - If the header points at an unknown cached account, the request is not considered authenticated.
 - In non-HTTP local/stdin contexts only, the server keeps a compatibility fallback to the first cached account.
@@ -211,6 +217,8 @@ Optional overrides:
 - `MICROSOFT_MCP_GRAPH_OBO_SCOPES`
 - `MICROSOFT_MCP_REQUIRE_AUTHORIZATION_CONSENT`
 - `MICROSOFT_MCP_ACCOUNT_HEADER_NAME`
+- `MICROSOFT_MCP_TRUSTED_HEADER_SECRET`
+- `MICROSOFT_MCP_TRUSTED_HEADER_SECRET_NAME`
 - `MICROSOFT_MCP_TOKEN_CACHE`
 
 ## Development
@@ -226,6 +234,7 @@ uvx ruff check --fix --unsafe-fixes .
 
 - `oauth_obo` is the recommended production mode.
 - `trusted_header_account` should only run behind a trusted upstream that fully owns the configured account header.
+- For HTTP deployments in `trusted_header_account`, configure `MICROSOFT_MCP_TRUSTED_HEADER_SECRET` unless you are in a tightly controlled compatibility scenario.
 - Do not trust prompt content for account selection.
 - Do not expose the shared-cache mode directly to the internet.
 - Only grant the Microsoft Graph permissions your deployment actually needs.
@@ -234,6 +243,8 @@ uvx ruff check --fix --unsafe-fixes .
 
 - `no_authenticated_mcp_user_token`: the request reached the MCP server without a valid authenticated MCP user token
 - `Microsoft Graph OBO exchange failed`: verify client secret, tenant ID, Graph permissions, and consent in Entra
+- `missing required trusted upstream header`: your trusted upstream did not send the configured trust-proof header
+- `invalid trusted upstream header`: the configured trust-proof header value did not match `MICROSOFT_MCP_TRUSTED_HEADER_SECRET`
 - `missing required trusted account header`: your trusted upstream did not send `MICROSOFT_MCP_ACCOUNT_HEADER_NAME`
 - `unknown cached account`: the trusted header value does not match any account in the local MSAL cache
 - `No cached access token is available`: re-run `authenticate.py` or the shared-cache auth tools to refresh the cached account

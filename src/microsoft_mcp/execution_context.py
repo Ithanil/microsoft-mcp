@@ -104,9 +104,41 @@ def _build_oauth_identity() -> RequestIdentity | None:
     )
 
 
+def _validate_trusted_upstream_request(
+    headers: dict[str, str], require_account: bool
+) -> RequestIdentity | None:
+    settings = get_settings()
+
+    # No HTTP request context: preserve stdio/local shared-cache compatibility.
+    if not headers or not settings.trusted_header_secret:
+        return None
+
+    trusted_secret = headers.get(settings.normalized_trusted_header_secret_name)
+    if trusted_secret == settings.trusted_header_secret:
+        return None
+
+    if trusted_secret is None:
+        message = (
+            "missing required trusted upstream header "
+            f"'{settings.trusted_header_secret_name}'"
+        )
+    else:
+        message = (
+            "invalid trusted upstream header "
+            f"'{settings.trusted_header_secret_name}'"
+        )
+
+    if require_account:
+        raise RuntimeError(message)
+    return RequestIdentity(auth_mode=settings.auth_mode, resolution_error=message)
+
+
 def _resolve_cached_account_identity(require_account: bool) -> RequestIdentity:
     settings = get_settings()
     headers = get_http_headers(include_all=True)
+    trust_error = _validate_trusted_upstream_request(headers, require_account)
+    if trust_error is not None:
+        return trust_error
     account_id = headers.get(settings.normalized_account_header_name) or None
     accounts = cache_auth.list_accounts()
 

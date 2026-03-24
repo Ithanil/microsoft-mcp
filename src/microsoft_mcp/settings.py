@@ -46,6 +46,11 @@ def _parse_bool(value: str | None, default: bool) -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _parse_header_name(value: str | None, default: str) -> str:
+    normalized = (value or "").strip()
+    return normalized or default
+
+
 @dataclass(frozen=True)
 class Settings:
     auth_mode: AuthMode
@@ -58,6 +63,8 @@ class Settings:
     graph_authorize_scopes: tuple[str, ...]
     graph_obo_scopes: tuple[str, ...]
     account_header_name: str
+    trusted_header_secret: str | None
+    trusted_header_secret_name: str
     require_authorization_consent: bool
 
     @property
@@ -71,6 +78,10 @@ class Settings:
     @property
     def normalized_account_header_name(self) -> str:
         return self.account_header_name.strip().lower()
+
+    @property
+    def normalized_trusted_header_secret_name(self) -> str:
+        return self.trusted_header_secret_name.strip().lower()
 
     @property
     def effective_identifier_uri(self) -> str | None:
@@ -99,8 +110,14 @@ def get_settings() -> Settings:
             os.getenv("MICROSOFT_MCP_GRAPH_OBO_SCOPES"),
             _DEFAULT_GRAPH_OBO_SCOPES,
         ),
-        account_header_name=os.getenv(
-            "MICROSOFT_MCP_ACCOUNT_HEADER_NAME", "x-microsoft-account-id"
+        account_header_name=_parse_header_name(
+            os.getenv("MICROSOFT_MCP_ACCOUNT_HEADER_NAME"),
+            "x-microsoft-account-id",
+        ),
+        trusted_header_secret=os.getenv("MICROSOFT_MCP_TRUSTED_HEADER_SECRET"),
+        trusted_header_secret_name=_parse_header_name(
+            os.getenv("MICROSOFT_MCP_TRUSTED_HEADER_SECRET_NAME"),
+            "x-microsoft-mcp-trusted-secret",
         ),
         require_authorization_consent=_parse_bool(
             os.getenv("MICROSOFT_MCP_REQUIRE_AUTHORIZATION_CONSENT"), True
