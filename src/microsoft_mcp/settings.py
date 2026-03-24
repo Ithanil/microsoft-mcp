@@ -63,6 +63,7 @@ class Settings:
     graph_authorize_scopes: tuple[str, ...]
     graph_obo_scopes: tuple[str, ...]
     account_header_name: str
+    account_email_header_name: str
     trusted_header_secret: str | None
     trusted_header_secret_name: str
     require_authorization_consent: bool
@@ -78,6 +79,10 @@ class Settings:
     @property
     def normalized_account_header_name(self) -> str:
         return self.account_header_name.strip().lower()
+
+    @property
+    def normalized_account_email_header_name(self) -> str:
+        return self.account_email_header_name.strip().lower()
 
     @property
     def normalized_trusted_header_secret_name(self) -> str:
@@ -113,6 +118,10 @@ def get_settings() -> Settings:
         account_header_name=_parse_header_name(
             os.getenv("MICROSOFT_MCP_ACCOUNT_HEADER_NAME"),
             "x-microsoft-account-id",
+        ),
+        account_email_header_name=_parse_header_name(
+            os.getenv("MICROSOFT_MCP_ACCOUNT_EMAIL_HEADER_NAME"),
+            "x-microsoft-user-email",
         ),
         trusted_header_secret=os.getenv("MICROSOFT_MCP_TRUSTED_HEADER_SECRET"),
         trusted_header_secret_name=_parse_header_name(

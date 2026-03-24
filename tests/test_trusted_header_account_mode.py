@@ -12,6 +12,7 @@ def _set_trusted_header_mode(
     *,
     trusted_secret: str | None = None,
     trusted_secret_name: str | None = None,
+    account_email_header_name: str | None = None,
 ):
     monkeypatch.setenv("MICROSOFT_MCP_AUTH_MODE", "trusted_header_account")
     monkeypatch.setenv("MICROSOFT_MCP_CLIENT_ID", "client-id")
@@ -25,6 +26,12 @@ def _set_trusted_header_mode(
     else:
         monkeypatch.setenv(
             "MICROSOFT_MCP_TRUSTED_HEADER_SECRET_NAME", trusted_secret_name
+        )
+    if account_email_header_name is None:
+        monkeypatch.delenv("MICROSOFT_MCP_ACCOUNT_EMAIL_HEADER_NAME", raising=False)
+    else:
+        monkeypatch.setenv(
+            "MICROSOFT_MCP_ACCOUNT_EMAIL_HEADER_NAME", account_email_header_name
         )
     settings_module.get_settings.cache_clear()
     execution_context.get_settings.cache_clear()
@@ -94,6 +101,80 @@ def test_get_auth_status_false_when_header_account_unknown(monkeypatch):
     assert status["authenticated"] is False
     assert status["graph_ready"] is False
     assert "unknown cached account" in status["reason"]
+
+
+def test_get_auth_status_true_for_email_header_and_cached_token(monkeypatch):
+    _set_trusted_header_mode(monkeypatch, trusted_secret="expected-secret")
+    monkeypatch.setattr(
+        execution_context,
+        "get_http_headers",
+        lambda include_all=True: {
+            "x-microsoft-user-email": "user@example.com",
+            "x-microsoft-mcp-trusted-secret": "expected-secret",
+        },
+    )
+    monkeypatch.setattr(
+        cache_auth,
+        "list_accounts",
+        lambda: [cache_auth.Account(username="user@example.com", account_id="acct-1")],
+    )
+    get_token = Mock(return_value="graph-token")
+    monkeypatch.setattr(cache_auth, "get_token", get_token)
+
+    status = execution_context.get_auth_status()
+
+    assert status == {
+        "auth_mode": "trusted_header_account",
+        "authenticated": True,
+        "graph_ready": True,
+        "username": "user@example.com",
+    }
+    get_token.assert_called_once_with("acct-1", allow_interactive=False)
+
+
+def test_get_auth_status_false_when_email_header_unknown(monkeypatch):
+    _set_trusted_header_mode(monkeypatch)
+    monkeypatch.setattr(
+        execution_context,
+        "get_http_headers",
+        lambda include_all=True: {"x-microsoft-user-email": "missing@example.com"},
+    )
+    monkeypatch.setattr(
+        cache_auth,
+        "list_accounts",
+        lambda: [cache_auth.Account(username="user@example.com", account_id="acct-1")],
+    )
+
+    status = execution_context.get_auth_status()
+
+    assert status["authenticated"] is False
+    assert status["graph_ready"] is False
+    assert "trusted email header" in status["reason"]
+    assert "references no cached account" in status["reason"]
+
+
+def test_get_auth_status_false_when_email_header_is_ambiguous(monkeypatch):
+    _set_trusted_header_mode(monkeypatch)
+    monkeypatch.setattr(
+        execution_context,
+        "get_http_headers",
+        lambda include_all=True: {"x-microsoft-user-email": "user@example.com"},
+    )
+    monkeypatch.setattr(
+        cache_auth,
+        "list_accounts",
+        lambda: [
+            cache_auth.Account(username="user@example.com", account_id="acct-1"),
+            cache_auth.Account(username="USER@example.com", account_id="acct-2"),
+        ],
+    )
+
+    status = execution_context.get_auth_status()
+
+    assert status["authenticated"] is False
+    assert status["graph_ready"] is False
+    assert "trusted email header" in status["reason"]
+    assert "matches multiple cached accounts" in status["reason"]
 
 
 def test_get_auth_status_graph_not_ready_when_cached_token_missing(monkeypatch):
@@ -251,6 +332,36 @@ def test_stdio_fallback_still_uses_first_cached_account(monkeypatch):
         "graph_ready": True,
         "username": "user@example.com",
     }
+    get_token.assert_called_once_with("acct-1", allow_interactive=False)
+
+
+def test_resolve_execution_context_uses_email_header(monkeypatch):
+    _set_trusted_header_mode(
+        monkeypatch,
+        trusted_secret="expected-secret",
+        account_email_header_name="x-openwebui-user-email",
+    )
+    monkeypatch.setattr(
+        execution_context,
+        "get_http_headers",
+        lambda include_all=True: {
+            "x-openwebui-user-email": "user@example.com",
+            "x-microsoft-mcp-trusted-secret": "expected-secret",
+        },
+    )
+    monkeypatch.setattr(
+        cache_auth,
+        "list_accounts",
+        lambda: [cache_auth.Account(username="user@example.com", account_id="acct-1")],
+    )
+    get_token = Mock(return_value="graph-token")
+    monkeypatch.setattr(cache_auth, "get_token", get_token)
+
+    context = execution_context.resolve_execution_context()
+
+    assert context.identity.account_id == "acct-1"
+    assert context.identity.username == "user@example.com"
+    assert context.graph_access_token == "graph-token"
     get_token.assert_called_once_with("acct-1", allow_interactive=False)
 
 

@@ -104,6 +104,14 @@ def _build_oauth_identity() -> RequestIdentity | None:
     )
 
 
+def _read_header_value(headers: dict[str, str], header_name: str) -> str | None:
+    value = headers.get(header_name)
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
 def _validate_trusted_upstream_request(
     headers: dict[str, str], require_account: bool
 ) -> RequestIdentity | None:
@@ -113,7 +121,9 @@ def _validate_trusted_upstream_request(
     if not headers or not settings.trusted_header_secret:
         return None
 
-    trusted_secret = headers.get(settings.normalized_trusted_header_secret_name)
+    trusted_secret = _read_header_value(
+        headers, settings.normalized_trusted_header_secret_name
+    )
     if trusted_secret == settings.trusted_header_secret:
         return None
 
@@ -139,7 +149,10 @@ def _resolve_cached_account_identity(require_account: bool) -> RequestIdentity:
     trust_error = _validate_trusted_upstream_request(headers, require_account)
     if trust_error is not None:
         return trust_error
-    account_id = headers.get(settings.normalized_account_header_name) or None
+    account_id = _read_header_value(headers, settings.normalized_account_header_name)
+    account_email = _read_header_value(
+        headers, settings.normalized_account_email_header_name
+    )
     accounts = cache_auth.list_accounts()
 
     if account_id:
@@ -161,17 +174,57 @@ def _resolve_cached_account_identity(require_account: bool) -> RequestIdentity:
             account_id=account.account_id,
         )
 
-    # In HTTP mode, the trusted header is mandatory. In stdio/local mode there is no
-    # active HTTP request, so we preserve the legacy shared-cache fallback behavior.
+    if account_email:
+        matching_accounts = [
+            account
+            for account in accounts
+            if account.username.casefold() == account_email.casefold()
+        ]
+        if not matching_accounts:
+            if require_account:
+                raise RuntimeError(
+                    f"Trusted email header '{settings.account_email_header_name}' references no cached account"
+                )
+            return RequestIdentity(
+                auth_mode=settings.auth_mode,
+                resolution_error=(
+                    f"trusted email header '{settings.account_email_header_name}' references no cached account"
+                ),
+            )
+        if len(matching_accounts) > 1:
+            if require_account:
+                raise RuntimeError(
+                    f"Trusted email header '{settings.account_email_header_name}' matches multiple cached accounts"
+                )
+            return RequestIdentity(
+                auth_mode=settings.auth_mode,
+                resolution_error=(
+                    f"trusted email header '{settings.account_email_header_name}' matches multiple cached accounts"
+                ),
+            )
+        account = matching_accounts[0]
+        return RequestIdentity(
+            auth_mode=settings.auth_mode,
+            username=account.username,
+            account_id=account.account_id,
+        )
+
+    # In HTTP mode, either the trusted account-id header or the trusted email header
+    # is mandatory. In stdio/local mode there is no active HTTP request, so we
+    # preserve the legacy shared-cache fallback behavior.
     if headers:
         if require_account:
             raise RuntimeError(
-                f"Missing required trusted account header '{settings.account_header_name}'"
+                "Missing required trusted account header "
+                f"'{settings.account_header_name}' or trusted email header "
+                f"'{settings.account_email_header_name}'"
             )
         return RequestIdentity(
             auth_mode=settings.auth_mode,
             resolution_error=(
-                f"missing required trusted account header '{settings.account_header_name}'"
+                "missing required trusted account header "
+                f"'{settings.account_header_name}' or trusted email header "
+                f"'{settings.account_email_header_name}'"
             ),
         )
 
@@ -236,7 +289,7 @@ def get_auth_status() -> dict[str, Any]:
     if not authenticated:
         status["reason"] = (
             identity.resolution_error
-            or f"missing '{settings.account_header_name}' header or no cached account available"
+            or f"missing '{settings.account_header_name}' or '{settings.account_email_header_name}' header or no cached account available"
         )
         return status
 

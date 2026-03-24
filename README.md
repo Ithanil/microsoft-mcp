@@ -119,6 +119,11 @@ After that, Open WebUI sends per-user bearer tokens to the MCP server, and this 
 
 `trusted_header_account` exists for deployments that still rely on the shared token cache, but want to remove `account_id` from the tool interface.
 
+The trusted upstream can identify the target cached account in either of these ways:
+
+- by `account_id` via `MICROSOFT_MCP_ACCOUNT_HEADER_NAME`
+- by user email or UPN via `MICROSOFT_MCP_ACCOUNT_EMAIL_HEADER_NAME`
+
 ### Required configuration
 
 ```bash
@@ -131,6 +136,7 @@ export MICROSOFT_MCP_TENANT_ID="your-single-tenant-id"
 
 # Optional overrides
 # export MICROSOFT_MCP_ACCOUNT_HEADER_NAME="x-microsoft-account-id"
+# export MICROSOFT_MCP_ACCOUNT_EMAIL_HEADER_NAME="x-microsoft-user-email"
 # export MICROSOFT_MCP_TRUSTED_HEADER_SECRET_NAME="x-microsoft-mcp-trusted-secret"
 # export MICROSOFT_MCP_TOKEN_CACHE="/path/to/token-cache.json"
 ```
@@ -144,11 +150,13 @@ Use either of these:
 
 ### Request routing requirements
 
-- Your trusted upstream must inject the current cached Microsoft `account_id` into the configured header for every HTTP request.
+- Your trusted upstream must inject either the current cached Microsoft `account_id` or the user email/UPN for every HTTP request.
+- Email-based lookup matches against the cached MSAL `username`, so the upstream should send the same Entra email/UPN that the shared-cache bootstrap flow stored.
 - If `MICROSOFT_MCP_TRUSTED_HEADER_SECRET` is configured, the upstream must also inject the matching secret into `MICROSOFT_MCP_TRUSTED_HEADER_SECRET_NAME`.
 - Requests with a missing or invalid trust-proof header are treated as untrusted and rejected before Graph access.
-- HTTP requests without that trusted header are rejected for business-tool execution.
+- HTTP requests without either configured identity header are rejected for business-tool execution.
 - If the header points at an unknown cached account, the request is not considered authenticated.
+- If the email header matches zero or multiple cached accounts, the request is not considered authenticated.
 - In non-HTTP local/stdin contexts only, the server keeps a compatibility fallback to the first cached account.
 
 ## Tool Surface
@@ -217,6 +225,7 @@ Optional overrides:
 - `MICROSOFT_MCP_GRAPH_OBO_SCOPES`
 - `MICROSOFT_MCP_REQUIRE_AUTHORIZATION_CONSENT`
 - `MICROSOFT_MCP_ACCOUNT_HEADER_NAME`
+- `MICROSOFT_MCP_ACCOUNT_EMAIL_HEADER_NAME`
 - `MICROSOFT_MCP_TRUSTED_HEADER_SECRET`
 - `MICROSOFT_MCP_TRUSTED_HEADER_SECRET_NAME`
 - `MICROSOFT_MCP_TOKEN_CACHE`
@@ -245,7 +254,9 @@ uvx ruff check --fix --unsafe-fixes .
 - `Microsoft Graph OBO exchange failed`: verify client secret, tenant ID, Graph permissions, and consent in Entra
 - `missing required trusted upstream header`: your trusted upstream did not send the configured trust-proof header
 - `invalid trusted upstream header`: the configured trust-proof header value did not match `MICROSOFT_MCP_TRUSTED_HEADER_SECRET`
-- `missing required trusted account header`: your trusted upstream did not send `MICROSOFT_MCP_ACCOUNT_HEADER_NAME`
+- `missing required trusted account header ... or trusted email header ...`: your trusted upstream did not send either configured identity header
+- `trusted email header references no cached account`: the forwarded email/UPN did not match any cached MSAL username
+- `trusted email header matches multiple cached accounts`: the forwarded email/UPN was ambiguous in the shared cache
 - `unknown cached account`: the trusted header value does not match any account in the local MSAL cache
 - `No cached access token is available`: re-run `authenticate.py` or the shared-cache auth tools to refresh the cached account
 
