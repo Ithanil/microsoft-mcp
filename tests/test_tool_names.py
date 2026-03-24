@@ -17,6 +17,7 @@ def _load_tool_registry(monkeypatch, mode: str):
 
 def _assert_core_tools_exist(tool_registry):
     expected = [
+        "get_auth_status",
         "list_emails",
         "get_email",
         "search_emails",
@@ -54,11 +55,11 @@ def test_oauth_obo_mode_hides_cached_account_tools(monkeypatch):
     tool_registry = _load_tool_registry(monkeypatch, "oauth_obo")
     _assert_core_tools_exist(tool_registry)
 
-    for name in ["list_accounts", "authenticate_account", "complete_authentication"]:
+    for name in ["authenticate_account", "complete_authentication", "list_accounts"]:
         assert name not in tool_registry, f"Tool '{name}' should not be exposed"
 
-    assert len(tool_registry) == 31, (
-        f"Expected 31 tools in oauth_obo mode, found {len(tool_registry)}: "
+    assert len(tool_registry) == 32, (
+        f"Expected 32 tools in oauth_obo mode, found {len(tool_registry)}: "
         f"{sorted(tool_registry.keys())}"
     )
 
@@ -68,8 +69,9 @@ def test_trusted_header_mode_keeps_cached_account_tools(monkeypatch):
     tool_registry = _load_tool_registry(monkeypatch, "trusted_header_account")
     _assert_core_tools_exist(tool_registry)
 
-    for name in ["list_accounts", "authenticate_account", "complete_authentication"]:
+    for name in ["authenticate_account", "complete_authentication"]:
         assert name in tool_registry, f"Expected tool '{name}' not found"
+    assert "list_accounts" not in tool_registry, "list_accounts should not be exposed"
 
     assert len(tool_registry) == 34, (
         f"Expected 34 tools in trusted_header_account mode, found {len(tool_registry)}: "

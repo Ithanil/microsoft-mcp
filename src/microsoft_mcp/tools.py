@@ -6,6 +6,7 @@ from fastmcp import FastMCP
 from .execution_context import (
     CurrentGraphAccessToken,
     build_auth_provider,
+    get_auth_status,
     should_expose_cached_account_tools,
 )
 from .settings import get_settings
@@ -28,15 +29,13 @@ FOLDERS = {
 }
 
 
-def _register_cached_account_tools() -> None:
-    @mcp.tool(name="list_accounts")
-    def list_accounts() -> list[dict[str, str]]:
-        """List all signed-in Microsoft accounts available to the shared cache mode."""
-        return [
-            {"username": acc.username, "account_id": acc.account_id}
-            for acc in auth.list_accounts()
-        ]
+@mcp.tool(name="get_auth_status")
+def get_auth_status_tool() -> dict[str, Any]:
+    """Report whether the current caller can be resolved for Microsoft operations."""
+    return get_auth_status()
 
+
+def _register_cached_account_tools() -> None:
     @mcp.tool(name="authenticate_account")
     def authenticate_account() -> dict[str, str]:
         """Authenticate a new Microsoft account using device flow authentication."""

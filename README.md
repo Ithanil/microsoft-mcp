@@ -91,7 +91,7 @@ claude
 
 ### Utility Tools
 - **`unified_search`** - Search across emails, events, and files
-- **`list_accounts`** - Show authenticated Microsoft accounts in `trusted_header_account` mode only
+- **`get_auth_status`** - Show whether the current request can be resolved for Microsoft operations
 - **`authenticate_account`** - Start device-flow authentication in `trusted_header_account` mode only
 - **`complete_authentication`** - Complete device-flow authentication in `trusted_header_account` mode only
 
@@ -182,6 +182,7 @@ Business tools no longer take `account_id`.
 
 - In `oauth_obo` mode, the authenticated MCP caller is used automatically.
 - In `trusted_header_account` mode, the server resolves the effective account internally from a trusted header or the local shared cache flow.
+- Use `get_auth_status` if you need to verify which mode is active and whether the current request is authenticated.
 
 ```python
 send_email("user@example.com", "Subject", "Body")

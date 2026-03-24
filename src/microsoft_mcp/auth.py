@@ -60,7 +60,7 @@ def get_app() -> msal.PublicClientApplication:
     return app
 
 
-def get_token(account_id: str | None = None) -> str:
+def get_token(account_id: str | None = None, allow_interactive: bool = True) -> str:
     app = get_app()
 
     accounts = app.get_accounts()
@@ -74,7 +74,7 @@ def get_token(account_id: str | None = None) -> str:
             valid_ids = [a["home_account_id"] for a in accounts]
             raise ValueError(
                 f"Account '{account_id}' not found in token cache. "
-                f"Use list_accounts to get valid account IDs. "
+                "Use authenticate.py or your trusted-header account mapping to get a valid cached account ID. "
                 f"Valid accounts: {valid_ids}"
             )
     elif accounts:
@@ -83,6 +83,12 @@ def get_token(account_id: str | None = None) -> str:
     result = app.acquire_token_silent(SCOPES, account=account)
 
     if not result:
+        if not allow_interactive:
+            target = f"account '{account_id}'" if account_id else "the default account"
+            raise RuntimeError(
+                f"No cached access token is available for {target}. "
+                "Use authenticate_account or authenticate.py to complete device-flow authentication."
+            )
         flow = app.initiate_device_flow(scopes=SCOPES)
         if "user_code" not in flow:
             raise Exception(

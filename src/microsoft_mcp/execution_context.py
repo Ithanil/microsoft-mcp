@@ -84,6 +84,115 @@ def _exchange_graph_access_token(user_assertion: str) -> str:
     return result["access_token"]
 
 
+def _build_oauth_identity() -> RequestIdentity | None:
+    access_token = get_access_token()
+    if access_token is None:
+        return None
+
+    claims = dict(access_token.claims or {})
+    return RequestIdentity(
+        auth_mode=get_settings().auth_mode,
+        tenant_id=claims.get("tid"),
+        principal_id=claims.get("oid") or claims.get("sub"),
+        username=(
+            claims.get("preferred_username")
+            or claims.get("upn")
+            or claims.get("email")
+        ),
+        claims=claims,
+    )
+
+
+def _resolve_cached_account_identity(require_account: bool) -> RequestIdentity:
+    settings = get_settings()
+    headers = get_http_headers(include_all=True)
+    account_id = headers.get(settings.normalized_account_header_name) or None
+    accounts = cache_auth.list_accounts()
+
+    if account_id:
+        account = next((acc for acc in accounts if acc.account_id == account_id), None)
+        if account is None:
+            if require_account:
+                raise RuntimeError(
+                    f"Trusted account header '{settings.account_header_name}' references an unknown cached account"
+                )
+            return RequestIdentity(
+                auth_mode=settings.auth_mode,
+                account_id=account_id,
+            )
+        return RequestIdentity(
+            auth_mode=settings.auth_mode,
+            username=account.username,
+            account_id=account.account_id,
+        )
+
+    # In HTTP mode, the trusted header is mandatory. In stdio/local mode there is no
+    # active HTTP request, so we preserve the legacy shared-cache fallback behavior.
+    if headers:
+        if require_account:
+            raise RuntimeError(
+                f"Missing required trusted account header '{settings.account_header_name}'"
+            )
+        return RequestIdentity(auth_mode=settings.auth_mode)
+
+    if accounts:
+        account = accounts[0]
+        return RequestIdentity(
+            auth_mode=settings.auth_mode,
+            username=account.username,
+            account_id=account.account_id,
+        )
+
+    if require_account:
+        raise RuntimeError("No authenticated Microsoft account is available in the shared cache")
+    return RequestIdentity(auth_mode=settings.auth_mode)
+
+
+def get_auth_status() -> dict[str, Any]:
+    settings = get_settings()
+
+    if settings.is_oauth_obo:
+        access_token = get_access_token()
+        if access_token is None:
+            return {
+                "auth_mode": settings.auth_mode,
+                "authenticated": False,
+                "graph_ready": False,
+                "reason": "no_authenticated_mcp_user_token",
+            }
+
+        identity = _build_oauth_identity()
+        assert identity is not None
+        status: dict[str, Any] = {
+            "auth_mode": settings.auth_mode,
+            "authenticated": True,
+            "graph_ready": True,
+            "username": identity.username,
+            "principal_id": identity.principal_id,
+            "tenant_id": identity.tenant_id,
+        }
+        try:
+            _exchange_graph_access_token(access_token.token)
+        except Exception as exc:
+            status["graph_ready"] = False
+            status["reason"] = str(exc)
+        return status
+
+    identity = _resolve_cached_account_identity(require_account=False)
+    authenticated = identity.account_id is not None
+    status = {
+        "auth_mode": settings.auth_mode,
+        "authenticated": authenticated,
+        "graph_ready": authenticated,
+        "username": identity.username,
+    }
+    if not authenticated:
+        status["reason"] = (
+            f"missing '{settings.account_header_name}' header or no cached account available"
+        )
+    return status
+
+
 def resolve_execution_context() -> ExecutionContext:
     settings = get_settings()
 
@@ -94,34 +203,20 @@ def resolve_execution_context() -> ExecutionContext:
                 "No authenticated MCP user token is available for Graph OBO exchange"
             )
 
-        claims = dict(access_token.claims or {})
-        identity = RequestIdentity(
-            auth_mode=settings.auth_mode,
-            tenant_id=claims.get("tid"),
-            principal_id=claims.get("oid") or claims.get("sub"),
-            username=(
-                claims.get("preferred_username")
-                or claims.get("upn")
-                or claims.get("email")
-            ),
-            claims=claims,
-        )
+        identity = _build_oauth_identity()
+        assert identity is not None
         return ExecutionContext(
             identity=identity,
             graph_access_token=_exchange_graph_access_token(access_token.token),
         )
 
     if settings.is_trusted_header_account:
-        headers = get_http_headers(include_all=True)
-        account_id = headers.get(settings.normalized_account_header_name) or None
-
-        identity = RequestIdentity(
-            auth_mode=settings.auth_mode,
-            account_id=account_id,
-        )
+        identity = _resolve_cached_account_identity(require_account=True)
         return ExecutionContext(
             identity=identity,
-            graph_access_token=cache_auth.get_token(account_id),
+            graph_access_token=cache_auth.get_token(
+                identity.account_id, allow_interactive=False
+            ),
         )
 
     raise RuntimeError(f"Unsupported authentication mode: {settings.auth_mode}")

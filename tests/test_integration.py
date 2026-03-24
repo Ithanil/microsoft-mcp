@@ -25,7 +25,6 @@ def parse_result(result, tool_name=None):
         data = json.loads(text)
         # FastMCP seems to unwrap single-element lists, so rewrap for consistency
         list_tools = {
-            "list_accounts",
             "list_emails",
             "list_events",
             "list_contacts",
@@ -57,27 +56,24 @@ async def get_session():
 
 async def get_account_info(session):
     """Get account info"""
-    result = await session.call_tool("list_accounts", {})
+    result = await session.call_tool("get_auth_status", {})
     assert not result.isError
-    accounts = parse_result(result, "list_accounts")
-    assert accounts and len(accounts) > 0, (
-        "No accounts found - please authenticate first"
-    )
-
-    return {"email": accounts[0]["username"], "account_id": accounts[0]["account_id"]}
+    status = parse_result(result)
+    assert status.get("authenticated"), "Current session is not authenticated"
+    assert status.get("username"), "Authenticated session should expose a username"
+    return {"email": status["username"]}
 
 
 @pytest.mark.asyncio
-async def test_list_accounts():
-    """Test list_accounts tool"""
+async def test_get_auth_status():
+    """Test get_auth_status tool"""
     async for session in get_session():
-        result = await session.call_tool("list_accounts", {})
+        result = await session.call_tool("get_auth_status", {})
         assert not result.isError
-        accounts = parse_result(result, "list_accounts")
-        assert accounts is not None
-        assert len(accounts) > 0
-        assert "username" in accounts[0]
-        assert "account_id" in accounts[0]
+        status = parse_result(result)
+        assert status.get("auth_mode") == "trusted_header_account"
+        assert status.get("authenticated") is True
+        assert "username" in status
 
 
 @pytest.mark.asyncio
@@ -675,7 +671,7 @@ async def test_list_files():
     async for session in get_session():
         account_info = await get_account_info(session)
         result = await session.call_tool(
-            "list_files", {"account_id": account_info["account_id"]}
+            "list_files", {}
         )
         assert not result.isError
         files = parse_result(result)
