@@ -37,7 +37,7 @@ def get_auth_status_tool() -> dict[str, Any]:
 
 def _register_cached_account_tools() -> None:
     @mcp.tool(name="authenticate_account")
-    def authenticate_account() -> dict[str, str]:
+    def authenticate_account() -> dict[str, Any]:
         """Authenticate a new Microsoft account using device flow authentication."""
         app = auth.get_app()
         flow = app.initiate_device_flow(scopes=auth.SCOPES)
