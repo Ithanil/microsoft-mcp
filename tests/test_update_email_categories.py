@@ -3,8 +3,7 @@
 from unittest.mock import patch
 from microsoft_mcp.tools import update_email as _update_email_tool
 
-# FastMCP 2.8.0: @mcp.tool(name=...) wraps in FunctionTool; .fn is the raw callable
-update_email = _update_email_tool.fn
+update_email = getattr(_update_email_tool, "fn", _update_email_tool)
 
 
 @patch("microsoft_mcp.tools.graph.request")
@@ -14,14 +13,14 @@ def test_categories_passed_in_patch_body(mock_request):
 
     result = update_email(
         email_id="msg-1",
-        account_id="acct-1",
         categories=["Blue category"],
+        graph_access_token="token-1",
     )
 
     mock_request.assert_called_once_with(
         "PATCH",
         "/me/messages/msg-1",
-        "acct-1",
+        "token-1",
         json={"categories": ["Blue category"]},
     )
     assert result["categories"] == ["Blue category"]
@@ -38,16 +37,16 @@ def test_categories_merged_with_updates(mock_request):
 
     result = update_email(
         email_id="msg-1",
-        account_id="acct-1",
         updates={"isRead": True, "categories": ["Old category"]},
         categories=["Red category"],
+        graph_access_token="token-1",
     )
 
     # categories kwarg wins over updates dict
     mock_request.assert_called_once_with(
         "PATCH",
         "/me/messages/msg-1",
-        "acct-1",
+        "token-1",
         json={"isRead": True, "categories": ["Red category"]},
     )
     assert result["categories"] == ["Red category"]
@@ -60,14 +59,14 @@ def test_updates_without_categories(mock_request):
 
     result = update_email(
         email_id="msg-1",
-        account_id="acct-1",
         updates={"isRead": False},
+        graph_access_token="token-1",
     )
 
     mock_request.assert_called_once_with(
         "PATCH",
         "/me/messages/msg-1",
-        "acct-1",
+        "token-1",
         json={"isRead": False},
     )
     assert result["isRead"] is False
@@ -80,14 +79,14 @@ def test_empty_categories_list_clears_categories(mock_request):
 
     result = update_email(
         email_id="msg-1",
-        account_id="acct-1",
         categories=[],
+        graph_access_token="token-1",
     )
 
     mock_request.assert_called_once_with(
         "PATCH",
         "/me/messages/msg-1",
-        "acct-1",
+        "token-1",
         json={"categories": []},
     )
     assert result["categories"] == []
@@ -96,7 +95,7 @@ def test_empty_categories_list_clears_categories(mock_request):
 def test_no_updates_and_no_categories_raises():
     """Calling with neither updates nor categories should raise ValueError."""
     try:
-        update_email(email_id="msg-1", account_id="acct-1")
+        update_email(email_id="msg-1", graph_access_token="token-1")
         assert False, "Expected ValueError"
     except ValueError as e:
         assert "Nothing to update" in str(e)

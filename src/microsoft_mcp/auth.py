@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+_DISALLOWED_TENANTS = {"common", "organizations", "consumers"}
+
 CACHE_FILE = pl.Path(
     os.getenv(
         "MICROSOFT_MCP_TOKEN_CACHE",
@@ -37,7 +39,13 @@ def get_app() -> msal.PublicClientApplication:
     if not client_id:
         raise ValueError("MICROSOFT_MCP_CLIENT_ID environment variable is required")
 
-    tenant_id = os.getenv("MICROSOFT_MCP_TENANT_ID", "common")
+    tenant_id = os.getenv("MICROSOFT_MCP_TENANT_ID")
+    if not tenant_id:
+        raise ValueError("MICROSOFT_MCP_TENANT_ID environment variable is required")
+    if tenant_id in _DISALLOWED_TENANTS:
+        raise ValueError(
+            "MICROSOFT_MCP_TENANT_ID must be a specific tenant ID for single-tenant deployments"
+        )
     authority = f"https://login.microsoftonline.com/{tenant_id}"
 
     cache = msal.SerializableTokenCache()

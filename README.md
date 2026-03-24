@@ -12,7 +12,8 @@ Kept as manual fork to provide this to a customer, irrespective of visibility ch
 - **Calendar Intelligence**: Create, update, check availability, respond to invitations
 - **OneDrive Files**: Upload, download, browse with pagination
 - **Contacts**: Search and list contacts from your address book
-- **Multi-Account**: Support for multiple Microsoft accounts (personal, work, school)
+- **Per-User OAuth/OBO**: Run Graph calls as the authenticated MCP caller in single-tenant Entra deployments
+- **Shared Cache Fallback**: Optional trusted-header/shared-cache mode for legacy account mapping workflows
 - **Unified Search**: Search across emails, files, events, and people
 
 ## Quick Start with Claude Desktop
@@ -90,9 +91,9 @@ claude
 
 ### Utility Tools
 - **`unified_search`** - Search across emails, events, and files
-- **`list_accounts`** - Show authenticated Microsoft accounts
-- **`authenticate_account`** - Start authentication for a new Microsoft account
-- **`complete_authentication`** - Complete the authentication process after entering device code
+- **`list_accounts`** - Show authenticated Microsoft accounts in `trusted_header_account` mode only
+- **`authenticate_account`** - Start device-flow authentication in `trusted_header_account` mode only
+- **`complete_authentication`** - Complete device-flow authentication in `trusted_header_account` mode only
 
 ## Manual Setup
 
@@ -100,16 +101,18 @@ claude
 
 1. Go to [Azure Portal](https://portal.azure.com) → Microsoft Entra ID → App registrations
 2. New registration → Name: `microsoft-mcp`
-3. Supported account types: Personal + Work/School
-4. Authentication → Allow public client flows: Yes
-5. API permissions → Add these delegated permissions:
+3. Supported account types: Single tenant only
+4. Authentication → Add a Web redirect URI for your MCP server callback, e.g. `https://your-server.example.com/auth/callback`
+5. Expose an API → add a custom scope such as `access_as_user`
+6. API permissions → Add these delegated Microsoft Graph permissions:
    - Mail.ReadWrite
+   - Mail.Send
    - Calendars.ReadWrite
    - Files.ReadWrite
-   - Contacts.Read
-   - People.Read
+   - Contacts.ReadWrite
    - User.Read
-6. Copy Application ID
+7. Create a client secret
+8. Copy Application ID, Directory (tenant) ID, and client secret
 
 ### 2. Installation
 
@@ -119,16 +122,21 @@ cd microsoft-mcp
 uv sync
 ```
 
-### 3. Authentication
+### 3. Server Configuration
 
 ```bash
-# Set your Azure app ID
+# Required for both modes
 export MICROSOFT_MCP_CLIENT_ID="your-app-id-here"
+export MICROSOFT_MCP_TENANT_ID="your-single-tenant-id"
 
-# Run authentication script
-uv run authenticate.py
+# Primary mode: per-user OAuth 2.1 + OBO
+export MICROSOFT_MCP_AUTH_MODE="oauth_obo"
+export MICROSOFT_MCP_CLIENT_SECRET="your-client-secret"
+export MICROSOFT_MCP_BASE_URL="https://your-server.example.com"
 
-# Follow the prompts to authenticate your Microsoft accounts
+# Optional legacy/shared-cache mode
+# export MICROSOFT_MCP_AUTH_MODE="trusted_header_account"
+# uv run authenticate.py
 ```
 
 ### 4. Claude Desktop Configuration
@@ -168,19 +176,17 @@ Or for local development:
 }
 ```
 
-## Multi-Account Support
+## Identity Model
 
-All tools require an `account_id` parameter as the first argument:
+Business tools no longer take `account_id`.
+
+- In `oauth_obo` mode, the authenticated MCP caller is used automatically.
+- In `trusted_header_account` mode, the server resolves the effective account internally from a trusted header or the local shared cache flow.
 
 ```python
-# List accounts to get IDs
-accounts = list_accounts()
-account_id = accounts[0]["account_id"]
-
-# Use account for operations
-send_email(account_id, "user@example.com", "Subject", "Body")
-list_emails(account_id, limit=10, include_body=True)
-create_event(account_id, "Meeting", "2024-01-15T10:00:00Z", "2024-01-15T11:00:00Z")
+send_email("user@example.com", "Subject", "Body")
+list_emails(limit=10, include_body=True)
+create_event("Meeting", "2024-01-15T10:00:00Z", "2024-01-15T11:00:00Z")
 ```
 
 ## Development
@@ -203,34 +209,25 @@ uvx ruff check --fix --unsafe-fixes .
 
 ### Smart Email Management
 ```python
-# Get account ID first
-accounts = list_accounts()
-account_id = accounts[0]["account_id"]
-
 # List latest emails with full content
-emails = list_emails(account_id, limit=10, include_body=True)
+emails = list_emails(limit=10, include_body=True)
 
 # Reply maintaining thread
-reply_to_email(account_id, email_id, "Thanks for your message. I'll review and get back to you.")
+reply_to_email(email_id, "Thanks for your message. I'll review and get back to you.")
 
 # Forward with attachments
-email = get_email(email_id, account_id)
-attachments = [get_attachment(email_id, att["id"], account_id) for att in email["attachments"]]
-send_email(account_id, "boss@company.com", f"FW: {email['subject']}", email["body"]["content"], attachments=attachments)
+email = get_email(email_id)
+attachments = [get_attachment(email_id, att["id"], f"/tmp/{att['name']}") for att in email["attachments"]]
+send_email("boss@company.com", f"FW: {email['subject']}", email["body"]["content"], attachments=attachments)
 ```
 
 ### Intelligent Scheduling
 ```python
-# Get account ID first
-accounts = list_accounts()
-account_id = accounts[0]["account_id"]
-
 # Check availability before scheduling
-availability = check_availability(account_id, "2024-01-15T10:00:00Z", "2024-01-15T18:00:00Z", ["colleague@company.com"])
+availability = check_availability("2024-01-15T10:00:00Z", "2024-01-15T18:00:00Z", ["colleague@company.com"])
 
 # Create meeting with details
 create_event(
-    account_id,
     "Project Review",
     "2024-01-15T14:00:00Z", 
     "2024-01-15T15:00:00Z",
@@ -242,15 +239,16 @@ create_event(
 
 ## Security Notes
 
-- Tokens are cached locally in `~/.microsoft_mcp_token_cache.json`
-- Use app-specific passwords if you have 2FA enabled
+- `oauth_obo` mode validates per-user MCP access tokens and exchanges them for Graph tokens on behalf of the caller
+- `trusted_header_account` mode uses the local token cache and should only be used behind a trusted upstream boundary
+- Shared-cache tokens are stored locally in `~/.microsoft_mcp_token_cache.json`
 - Only request permissions your app actually needs
 - Consider using a dedicated app registration for production
 
 ## Troubleshooting
 
 - **Authentication fails**: Check your CLIENT_ID is correct
-- **"Need admin approval"**: Use `MICROSOFT_MCP_TENANT_ID=consumers` for personal accounts
+- **Missing client secret/base URL**: Required in `oauth_obo` mode
 - **Missing permissions**: Ensure all required API permissions are granted in Azure
 - **Token errors**: Delete `~/.microsoft_mcp_token_cache.json` and re-authenticate
 
